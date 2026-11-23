@@ -23,14 +23,49 @@ export interface CategoryMultiple {
   category: string;
   peer_count: number;
   category_median: number | null;
+  category_p25: number | null;
+  category_p75: number | null;
   global_median: number;
   multiple: number;
+  p25_multiple: number;
+  p75_multiple: number;
 }
 
 export interface MultipleTable {
   global_median: number;
+  global_p25: number;
+  global_p75: number;
+  multiple_cap: number;
   global_peer_count: number;
   by_category: Record<string, CategoryMultiple>;
+}
+
+export interface CategoryModelStats {
+  peers: number;
+  median_multiple: number;
+  p25_multiple: number;
+  p75_multiple: number;
+  launch_prior: number;
+}
+
+export interface ValidationStats {
+  count: number;
+  median_ratio: number;
+  within_2x: number;
+  within_3x: number;
+  within_2x_pct: number;
+  within_3x_pct: number;
+}
+
+export interface ModelStats {
+  global_median_multiple: number;
+  global_p25_multiple: number;
+  global_p75_multiple: number;
+  multiple_cap_p90: number;
+  global_peer_count: number;
+  shrinkage_weight: number;
+  validation: ValidationStats;
+  categories: Record<string, CategoryModelStats>;
 }
 
 export interface BoardRow {
@@ -38,6 +73,8 @@ export interface BoardRow {
   name: string;
   rank: number;
   implied_value_usd: number;
+  implied_low_usd: number;
+  implied_high_usd: number;
   tvl_usd: number;
   category: string;
   chains: string[];
@@ -48,6 +85,8 @@ export interface BoardRow {
   momentum_mult: number;
   maturity_mult: number;
   breadth_mult: number;
+  launch_prior: number;
+  farm_score: number;
   farm_steps: string[];
 }
 
@@ -56,11 +95,13 @@ export interface BoardResult {
   floor_usd: number;
   rows: BoardRow[];
   multiples: MultipleTable;
+  model_stats: ModelStats;
 }
 
 const MIN_MULTIPLE = 0.05;
-const MAX_MULTIPLE = 20;
-const SHRINKAGE_WEIGHT = 3;
+const MULTIPLE_CAP_QUANTILE = 0.9;
+const SHRINKAGE_WEIGHT = 5;
+const MIN_VALIDATION_TVL_USD = 5_000_000;
 const MATURITY_NULL_FACTOR = 0.95;
 const MATURITY_TAU_DAYS = 540;
 const MS_PER_DAY = 86_400_000;
@@ -77,6 +118,10 @@ const VERSION_MARKER_RE = / [Vv]?\d+(?:\.\d+)?$/;
 const WRAPPED_OR_STAKED_RE = /\b(?:wrapped|staked|staking)\b/i;
 const EXCHANGE_PREFIX_RE = /^(?:Binance|Coinbase|Bybit|Kraken|Bitget|OKX|Bitfinex|Gemini)(?: |$)/;
 
+export function isTokenized(p: Protocol): boolean {
+  return p.gecko_id !== null || p.symbol !== null;
+}
+
 /**
  * Determine whether a snapshot protocol is a token-launch candidate.
  * A protocol qualifies only when it records no token (both `gecko_id` and
@@ -84,7 +129,7 @@ const EXCHANGE_PREFIX_RE = /^(?:Binance|Coinbase|Bybit|Kraken|Bitget|OKX|Bitfine
  * exchange-product exclusion rules.
  */
 export function isLaunchCandidate(p: Protocol): boolean {
-  if (p.gecko_id !== null || p.symbol !== null) return false;
+  if (isTokenized(p)) return false;
   if (p.category !== null && EXCLUDED_CATEGORIES.has(p.category)) return false;
   if (VERSION_MARKER_RE.test(p.name)) return false;
   if (WRAPPED_OR_STAKED_RE.test(p.name)) return false;
@@ -96,6 +141,10 @@ function clamp(value: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, value));
 }
 
+export function round1(value: number): number {
+  return Math.round(value * 10) / 10;
+}
+
 export function round4(value: number): number {
   return Math.round(value * 10_000) / 10_000;
 }
@@ -104,13 +153,22 @@ function byCodeUnit(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
-export function median(values: readonly number[]): number {
+/** Linear-interpolated percentile (p in [0, 1]) over a non-empty numeric series. */
+export function percentile(values: readonly number[], p: number): number {
   if (values.length === 0) {
-    throw new Error('median requires at least one value');
+    throw new Error('percentile requires at least one value');
   }
   const sorted = [...values].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
+  const q = clamp(p, 0, 1);
+  const idx = q * (sorted.length - 1);
+  const lo = Math.floor(idx);
+  const hi = Math.ceil(idx);
+  if (lo === hi) return sorted[lo]!;
+  return sorted[lo]! + (idx - lo) * (sorted[hi]! - sorted[lo]!);
+}
+
+export function median(values: readonly number[]): number {
+  return percentile(values, 0.5);
 }
 
 /** Deterministic 32-bit FNV-1a hash of a string. */
@@ -155,10 +213,26 @@ export function parseSnapshot(raw: string): Snapshot {
   };
 }
 
+function hasValidPeerMultiple(p: Protocol): boolean {
+  return (
+    isTokenized(p) &&
+    p.mcap_usd !== null &&
+    p.mcap_usd > 0 &&
+    p.tvl_usd > 0 &&
+    Number.isFinite(p.mcap_usd / p.tvl_usd)
+  );
+}
+
+function shrinkStatistic(n: number, catValue: number, globalValue: number): number {
+  return (n * catValue + SHRINKAGE_WEIGHT * globalValue) / (n + SHRINKAGE_WEIGHT);
+}
+
 /**
- * Derive shrunk mcap/TVL multiples per category directly from the snapshot's
- * tokenised protocols (mcap_usd > 0 and tvl_usd > 0; non-positive mcap_usd
- * entries in DefiLlama represent missing supply data rather than $0 tokens).
+ * Derive shrunk mcap/TVL multiples (median, p25, p75) per category directly
+ * from the snapshot's tokenised protocols (mcap_usd > 0 and tvl_usd > 0;
+ * non-positive mcap_usd entries in DefiLlama represent missing supply data
+ * rather than $0 tokens). Upper cap is the data-derived 90th percentile of
+ * all tokenised peers' multiples.
  */
 export function computeCategoryMultiples(protocols: readonly Protocol[]): MultipleTable {
   const allRatios: number[] = [];
@@ -168,22 +242,29 @@ export function computeCategoryMultiples(protocols: readonly Protocol[]): Multip
   for (const p of protocols) {
     const cat = p.category ?? 'Uncategorized';
     allCategories.add(cat);
-    if (p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0) {
-      const ratio = p.mcap_usd / p.tvl_usd;
-      if (Number.isFinite(ratio)) {
-        allRatios.push(ratio);
-        const list = ratiosByCategory.get(cat);
-        if (list) {
-          list.push(ratio);
-        } else {
-          ratiosByCategory.set(cat, [ratio]);
-        }
+    if (hasValidPeerMultiple(p)) {
+      const ratio = p.mcap_usd! / p.tvl_usd;
+      allRatios.push(ratio);
+      const list = ratiosByCategory.get(cat);
+      if (list) {
+        list.push(ratio);
+      } else {
+        ratiosByCategory.set(cat, [ratio]);
       }
     }
   }
 
-  const globalMedian = allRatios.length > 0 ? median(allRatios) : 1;
-  const clampedGlobal = clamp(globalMedian, MIN_MULTIPLE, MAX_MULTIPLE);
+  const globalMedian = allRatios.length > 0 ? percentile(allRatios, 0.5) : 1;
+  const globalP25 = allRatios.length > 0 ? percentile(allRatios, 0.25) : 1;
+  const globalP75 = allRatios.length > 0 ? percentile(allRatios, 0.75) : 1;
+  const multipleCap = Math.max(
+    MIN_MULTIPLE,
+    allRatios.length > 0 ? percentile(allRatios, MULTIPLE_CAP_QUANTILE) : 1,
+  );
+
+  const clampedGlobalMed = clamp(globalMedian, MIN_MULTIPLE, multipleCap);
+  const clampedGlobalP25 = Math.min(clampedGlobalMed, Math.max(0, globalP25));
+  const clampedGlobalP75 = clamp(globalP75, clampedGlobalMed, multipleCap);
 
   const byCategory: Record<string, CategoryMultiple> = {};
   for (const cat of [...allCategories].sort(byCodeUnit)) {
@@ -194,26 +275,157 @@ export function computeCategoryMultiples(protocols: readonly Protocol[]): Multip
         category: cat,
         peer_count: 0,
         category_median: null,
+        category_p25: null,
+        category_p75: null,
         global_median: globalMedian,
-        multiple: clampedGlobal,
+        multiple: clampedGlobalMed,
+        p25_multiple: clampedGlobalP25,
+        p75_multiple: clampedGlobalP75,
       };
     } else {
-      const catMed = median(ratios);
-      const shrunk = (n * catMed + SHRINKAGE_WEIGHT * globalMedian) / (n + SHRINKAGE_WEIGHT);
+      const catMed = percentile(ratios, 0.5);
+      const catP25 = percentile(ratios, 0.25);
+      const catP75 = percentile(ratios, 0.75);
+      const med = clamp(shrinkStatistic(n, catMed, globalMedian), MIN_MULTIPLE, multipleCap);
+      const p25 = Math.min(med, Math.max(0, shrinkStatistic(n, catP25, globalP25)));
+      const p75 = clamp(shrinkStatistic(n, catP75, globalP75), med, multipleCap);
       byCategory[cat] = {
         category: cat,
         peer_count: n,
         category_median: catMed,
+        category_p25: catP25,
+        category_p75: catP75,
         global_median: globalMedian,
-        multiple: clamp(shrunk, MIN_MULTIPLE, MAX_MULTIPLE),
+        multiple: med,
+        p25_multiple: p25,
+        p75_multiple: p75,
       };
     }
   }
 
   return {
     global_median: globalMedian,
+    global_p25: globalP25,
+    global_p75: globalP75,
+    multiple_cap: multipleCap,
     global_peer_count: allRatios.length,
     by_category: byCategory,
+  };
+}
+
+/**
+ * Per-category launch prior: share (%) of snapshot protocols with TVL >= $5M
+ * in that category that already have a token, rounded to 1 decimal.
+ */
+export function computeCategoryLaunchPriors(protocols: readonly Protocol[]): Record<string, number> {
+  const counts = new Map<string, { total: number; tokenized: number }>();
+  const allCategories = new Set<string>();
+
+  for (const p of protocols) {
+    const cat = p.category ?? 'Uncategorized';
+    allCategories.add(cat);
+    if (p.tvl_usd < MIN_VALIDATION_TVL_USD) continue;
+    let entry = counts.get(cat);
+    if (!entry) {
+      entry = { total: 0, tokenized: 0 };
+      counts.set(cat, entry);
+    }
+    entry.total += 1;
+    if (isTokenized(p)) {
+      entry.tokenized += 1;
+    }
+  }
+
+  const priors: Record<string, number> = {};
+  for (const cat of [...allCategories].sort(byCodeUnit)) {
+    const entry = counts.get(cat);
+    priors[cat] = entry && entry.total > 0 ? round1((entry.tokenized / entry.total) * 100) : 0;
+  }
+  return priors;
+}
+
+/**
+ * Leave-one-out validation across every tokenised snapshot protocol with
+ * TVL >= $5M and a valid positive market cap. Each protocol's market cap is
+ * predicted with its category multiple, global median, and p90 cap computed
+ * strictly without that protocol.
+ */
+export function computeLeaveOneOutValidation(snapshot: Snapshot): ValidationStats {
+  const peerEntries: Array<{ idx: number; category: string; ratio: number }> = [];
+  const evalIndices: number[] = [];
+
+  for (let i = 0; i < snapshot.protocols.length; i++) {
+    const p = snapshot.protocols[i]!;
+    if (hasValidPeerMultiple(p)) {
+      peerEntries.push({
+        idx: i,
+        category: p.category ?? 'Uncategorized',
+        ratio: p.mcap_usd! / p.tvl_usd,
+      });
+      if (p.tvl_usd >= MIN_VALIDATION_TVL_USD) {
+        evalIndices.push(i);
+      }
+    }
+  }
+
+  if (evalIndices.length === 0) {
+    return {
+      count: 0,
+      median_ratio: 0,
+      within_2x: 0,
+      within_3x: 0,
+      within_2x_pct: 0,
+      within_3x_pct: 0,
+    };
+  }
+
+  const ratios: number[] = [];
+  let within2 = 0;
+  let within3 = 0;
+
+  for (const targetIdx of evalIndices) {
+    const p = snapshot.protocols[targetIdx]!;
+    const targetCat = p.category ?? 'Uncategorized';
+    const otherAll: number[] = [];
+    const otherCat: number[] = [];
+
+    for (const entry of peerEntries) {
+      if (entry.idx === targetIdx) continue;
+      otherAll.push(entry.ratio);
+      if (entry.category === targetCat) {
+        otherCat.push(entry.ratio);
+      }
+    }
+
+    const globalMed = otherAll.length > 0 ? percentile(otherAll, 0.5) : 1;
+    const cap = Math.max(
+      MIN_MULTIPLE,
+      otherAll.length > 0 ? percentile(otherAll, MULTIPLE_CAP_QUANTILE) : 1,
+    );
+    const n = otherCat.length;
+    const rawMult = n === 0 ? globalMed : shrinkStatistic(n, percentile(otherCat, 0.5), globalMed);
+    const mult = clamp(rawMult, MIN_MULTIPLE, cap);
+
+    const factors =
+      computeMomentumMult(p.change_7d) *
+      computeMaturityMult(p.listed_at, snapshot.as_of) *
+      computeBreadthMult(p.chains);
+    const predicted = Math.max(1, Math.round(p.tvl_usd * mult * factors));
+    const ratio = predicted / p.mcap_usd!;
+    ratios.push(ratio);
+
+    if (ratio >= 0.5 && ratio <= 2) within2 += 1;
+    if (ratio >= 1 / 3 && ratio <= 3) within3 += 1;
+  }
+
+  const count = ratios.length;
+  return {
+    count,
+    median_ratio: round4(median(ratios)),
+    within_2x: round4(within2 / count),
+    within_3x: round4(within3 / count),
+    within_2x_pct: round1((within2 / count) * 100),
+    within_3x_pct: round1((within3 / count) * 100),
   };
 }
 
@@ -239,48 +451,78 @@ export function computeBreadthMult(chains: readonly string[]): number {
   return chains.length >= 3 ? 1.05 : 1;
 }
 
+export interface CapitalTier {
+  capitalUsd: number;
+  capital: string;
+  half: string;
+  quarter: string;
+  weeks: number;
+}
+
 interface FarmContext {
   slug: string;
   name: string;
   category: string;
   mainChain: string;
+  capitalUsd: number;
   capital: string;
   halfCapital: string;
   quarterCapital: string;
+  weeks: number;
+  weeklyMinutes: number;
   gas: string;
   isEthereum: boolean;
 }
 
-function capitalTier(tvlUsd: number): { capital: string; half: string; quarter: string } {
-  if (tvlUsd < 10_000_000) return { capital: '$250', half: '$125', quarter: '$60' };
-  if (tvlUsd < 50_000_000) return { capital: '$500', half: '$250', quarter: '$125' };
-  if (tvlUsd < 250_000_000) return { capital: '$1,000', half: '$500', quarter: '$250' };
-  return { capital: '$2,500', half: '$1,250', quarter: '$625' };
+/** Single source of truth for TVL-banded farm plan capital & duration tiers. */
+export function getCapitalTier(tvlUsd: number): CapitalTier {
+  if (tvlUsd < 10_000_000) {
+    return { capitalUsd: 250, capital: '$250', half: '$125', quarter: '$60', weeks: 8 };
+  }
+  if (tvlUsd < 50_000_000) {
+    return { capitalUsd: 500, capital: '$500', half: '$250', quarter: '$125', weeks: 10 };
+  }
+  if (tvlUsd < 250_000_000) {
+    return { capitalUsd: 1_000, capital: '$1,000', half: '$500', quarter: '$250', weeks: 12 };
+  }
+  return { capitalUsd: 2_500, capital: '$2,500', half: '$1,250', quarter: '$625', weeks: 16 };
+}
+
+function estimateWeeklyMinutes(category: string | null): number {
+  const group = resolveCategoryGroup(category);
+  if (group === 'PerpDerivatives' || group === 'Chain' || category === 'Prediction Market') {
+    return 20;
+  }
+  return 15;
 }
 
 function makeFarmContext(p: Protocol): FarmContext {
   const mainChain = p.chains[0] ?? 'Ethereum';
   const isEthereum = mainChain === 'Ethereum';
-  const tier = capitalTier(p.tvl_usd);
+  const tier = getCapitalTier(p.tvl_usd);
   return {
     slug: p.slug,
     name: p.name,
     category: p.category ?? 'DeFi',
     mainChain,
+    capitalUsd: tier.capitalUsd,
     capital: tier.capital,
     halfCapital: tier.half,
     quarterCapital: tier.quarter,
+    weeks: tier.weeks,
+    weeklyMinutes: estimateWeeklyMinutes(p.category),
     gas: isEthereum ? '$8-$25 per tx' : '$0.10-$2 per tx',
     isEthereum,
   };
 }
 
 function step1WalletAndBridge(ctx: FarmContext): string {
+  const budgetPrefix = `Budget: ${ctx.capital} over ~${ctx.weeks} weeks, ~${ctx.weeklyMinutes} min/week.`;
   const templates = [
-    `Create a dedicated wallet for ${ctx.name} on ${ctx.mainChain} and bridge ${ctx.capital} in USDC or native gas via a canonical bridge; est. gas ${ctx.gas}, ~20 min setup.`,
-    `Fund a fresh ${ctx.mainChain} address with ${ctx.capital} plus gas buffer for ${ctx.name} using an audited bridge; expect ${ctx.gas} in fees and ~25 min initial setup.`,
-    `Set up an isolated ${ctx.mainChain} wallet and transfer ${ctx.capital} in liquid collateral for ${ctx.name} interactions; budget ${ctx.gas} in gas and ~20 min onboarding.`,
-    `Configure a clean ${ctx.mainChain} signer and bridge ${ctx.capital} in stablecoins or ETH/native gas for ${ctx.name}; gas cost ${ctx.gas}, ~15 min one-time setup.`,
+    `${budgetPrefix} Create a dedicated wallet for ${ctx.name} on ${ctx.mainChain} and bridge ${ctx.capital} in USDC or native gas via a canonical bridge; est. gas ${ctx.gas}, ~20 min setup.`,
+    `${budgetPrefix} Fund a fresh ${ctx.mainChain} address with ${ctx.capital} plus gas buffer for ${ctx.name} using an audited bridge; expect ${ctx.gas} in fees and ~25 min initial setup.`,
+    `${budgetPrefix} Set up an isolated ${ctx.mainChain} wallet and transfer ${ctx.capital} in liquid collateral for ${ctx.name} interactions; budget ${ctx.gas} in gas and ~20 min onboarding.`,
+    `${budgetPrefix} Configure a clean ${ctx.mainChain} signer and bridge ${ctx.capital} in stablecoins or ETH/native gas for ${ctx.name}; gas cost ${ctx.gas}, ~15 min one-time setup.`,
   ];
   return pick(templates, ctx.slug, 's1');
 }
@@ -674,27 +916,50 @@ export function buildFarmSteps(p: Protocol): string[] {
 /** Build the full ranked token-launch radar board from a sealed snapshot. */
 export function buildBoard(snapshot: Snapshot): BoardResult {
   const multiples = computeCategoryMultiples(snapshot.protocols);
+  const launchPriors = computeCategoryLaunchPriors(snapshot.protocols);
+  const validation = computeLeaveOneOutValidation(snapshot);
   const watchlistSet = new Set(snapshot.watchlist);
 
   // Select launch candidates that record no token and are not wrapped/bridged/exchange products.
   const candidates = snapshot.protocols.filter(isLaunchCandidate);
 
+  const fallbackMed = clamp(multiples.global_median, MIN_MULTIPLE, multiples.multiple_cap);
+  const fallbackP25 = Math.min(fallbackMed, Math.max(0, multiples.global_p25));
+  const fallbackP75 = clamp(multiples.global_p75, fallbackMed, multiples.multiple_cap);
+
   const draftRows: BoardRow[] = candidates.map((p) => {
     const category = p.category ?? 'Uncategorized';
     const catInfo = multiples.by_category[category];
-    const mult = catInfo ? catInfo.multiple : clamp(multiples.global_median, MIN_MULTIPLE, MAX_MULTIPLE);
+    const mult = catInfo ? catInfo.multiple : fallbackMed;
+    let p25Mult = Math.min(catInfo ? catInfo.p25_multiple : fallbackP25, mult);
+    let p75Mult = Math.max(catInfo ? catInfo.p75_multiple : fallbackP75, mult);
+    if (!(p25Mult > 0 && p75Mult / p25Mult >= 1.25)) {
+      p25Mult = Math.min(p25Mult, fallbackP25);
+      p75Mult = Math.max(p75Mult, fallbackP75);
+    }
     const momentumMult = computeMomentumMult(p.change_7d);
     const maturityMult = computeMaturityMult(p.listed_at, snapshot.as_of);
     const breadthMult = computeBreadthMult(p.chains);
+    const factors = momentumMult * maturityMult * breadthMult;
 
-    const base = p.tvl_usd * mult;
-    const implied = Math.max(1, Math.round(base * momentumMult * maturityMult * breadthMult));
+    const implied = Math.max(1, Math.round(p.tvl_usd * mult * factors));
+    const impliedLow = Math.max(
+      1,
+      Math.min(Math.floor(implied * 0.99), Math.round(p.tvl_usd * p25Mult * factors)),
+    );
+    const impliedHigh = Math.max(
+      Math.ceil(implied * 1.01),
+      Math.round(p.tvl_usd * p75Mult * factors),
+    );
+    const launchPrior = launchPriors[category] ?? 0;
 
     return {
       slug: p.slug,
       name: p.name,
       rank: 0,
       implied_value_usd: implied,
+      implied_low_usd: impliedLow,
+      implied_high_usd: impliedHigh,
       tvl_usd: p.tvl_usd,
       category,
       chains: [...p.chains],
@@ -705,6 +970,8 @@ export function buildBoard(snapshot: Snapshot): BoardResult {
       momentum_mult: round4(momentumMult),
       maturity_mult: round4(maturityMult),
       breadth_mult: round4(breadthMult),
+      launch_prior: launchPrior,
+      farm_score: 1,
       farm_steps: buildFarmSteps(p),
     };
   });
@@ -715,6 +982,7 @@ export function buildBoard(snapshot: Snapshot): BoardResult {
     return byCodeUnit(a.slug, b.slug);
   });
 
+  const rawFarmScores: number[] = [];
   for (let i = 0; i < draftRows.length; i++) {
     const row = draftRows[i]!;
     row.rank = i + 1;
@@ -724,12 +992,80 @@ export function buildBoard(snapshot: Snapshot): BoardResult {
         row.implied_value_usd = Math.max(1, prev.implied_value_usd - 1);
       }
     }
+    row.implied_low_usd = Math.max(
+      1,
+      Math.min(row.implied_low_usd, Math.floor(row.implied_value_usd * 0.99)),
+    );
+    row.implied_high_usd = Math.max(
+      row.implied_high_usd,
+      Math.ceil(row.implied_value_usd * 1.01),
+    );
+
+    const tier = getCapitalTier(row.tvl_usd);
+    rawFarmScores.push((row.implied_value_usd * row.launch_prior) / 100 / tier.capitalUsd);
   }
+
+  const positiveLogs: number[] = [];
+  for (const raw of rawFarmScores) {
+    if (raw > 0) {
+      positiveLogs.push(Math.log10(raw));
+    }
+  }
+
+  if (positiveLogs.length === 0) {
+    for (const row of draftRows) {
+      row.farm_score = 50;
+    }
+  } else {
+    let minLog = Infinity;
+    let maxLog = -Infinity;
+    for (const logVal of positiveLogs) {
+      if (logVal < minLog) minLog = logVal;
+      if (logVal > maxLog) maxLog = logVal;
+    }
+    const span = maxLog - minLog;
+    for (let i = 0; i < draftRows.length; i++) {
+      const row = draftRows[i]!;
+      const raw = rawFarmScores[i]!;
+      if (raw <= 0) {
+        row.farm_score = 1;
+      } else if (span === 0) {
+        row.farm_score = 50;
+      } else {
+        const scaled = 1 + (99 * (Math.log10(raw) - minLog)) / span;
+        row.farm_score = clamp(Math.round(scaled), 1, 100);
+      }
+    }
+  }
+
+  const categoryStats: Record<string, CategoryModelStats> = {};
+  for (const cat of Object.keys(multiples.by_category).sort(byCodeUnit)) {
+    const info = multiples.by_category[cat]!;
+    categoryStats[cat] = {
+      peers: info.peer_count,
+      median_multiple: round4(info.multiple),
+      p25_multiple: round4(info.p25_multiple),
+      p75_multiple: round4(info.p75_multiple),
+      launch_prior: launchPriors[cat] ?? 0,
+    };
+  }
+
+  const modelStats: ModelStats = {
+    global_median_multiple: round4(multiples.global_median),
+    global_p25_multiple: round4(multiples.global_p25),
+    global_p75_multiple: round4(multiples.global_p75),
+    multiple_cap_p90: round4(multiples.multiple_cap),
+    global_peer_count: multiples.global_peer_count,
+    shrinkage_weight: SHRINKAGE_WEIGHT,
+    validation,
+    categories: categoryStats,
+  };
 
   return {
     as_of: snapshot.as_of,
     floor_usd: snapshot.floor_usd,
     rows: draftRows,
     multiples,
+    model_stats: modelStats,
   };
 }

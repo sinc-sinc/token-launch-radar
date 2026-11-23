@@ -86,6 +86,7 @@ function main(): void {
   const radarPayload = {
     as_of: result.as_of,
     floor_usd: result.floor_usd,
+    model_stats: result.model_stats,
     rows: result.rows,
   };
   const zdataJson = JSON.stringify(radarPayload).replace(/<\//g, '<\\/');
@@ -108,8 +109,21 @@ function main(): void {
     process.stdout.write('token-radar: screenshots/ missing or empty; skipping dossier.json\n');
   }
 
+  const v = result.model_stats.validation;
+  const top5Lines = result.rows
+    .slice(0, 5)
+    .map(
+      (r) =>
+        `  #${r.rank} ${r.name} (${r.category}): $${r.implied_value_usd.toLocaleString('en-US')} ` +
+        `[$${r.implied_low_usd.toLocaleString('en-US')}..$${r.implied_high_usd.toLocaleString('en-US')}] ` +
+        `prior=${r.launch_prior}% farm_score=${r.farm_score.toLocaleString('en-US')}`,
+    )
+    .join('\n');
+
   process.stdout.write(
     `token-radar: scored ${result.rows.length} pre-token protocols (${snapshot.watchlist.length} watchlist) from ${snapshot.protocols.length} total\n` +
+      `token-radar: model LOO validation (n=${v.count}): median_ratio=${v.median_ratio}, within_2x=${v.within_2x_pct}%, within_3x=${v.within_3x_pct}% (global_med=${result.model_stats.global_median_multiple}x, p90_cap=${result.model_stats.multiple_cap_p90}x)\n` +
+      `token-radar: top-5:\n${top5Lines}\n` +
       `token-radar: wrote ${boardPath}, ${zdataPath} (${copiedDash} dashboard files copied)${wroteDossier ? `, ${join(outputDir, 'dossier.json')}` : ''}\n`,
   );
 }
