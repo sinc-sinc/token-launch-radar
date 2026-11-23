@@ -14,6 +14,45 @@ const DEFAULT_SNAPSHOTS = [
   '/input/snapshot.json',
 ];
 
+const EXCLUDED_CATEGORIES = new Set([
+  'Bridge',
+  'Canonical Bridge',
+  'Liquid Staking',
+  'Liquid Restaking',
+  'Restaked BTC',
+  'CEX',
+]);
+const VERSION_MARKER_RE = / [Vv]?\d+(?:\.\d+)?$/;
+const WRAPPED_OR_STAKED_RE = /\b(?:wrapped|staked|staking)\b/i;
+const EXCHANGE_PREFIX_RE = /^(?:Binance|Coinbase|Bybit|Kraken|Bitget|OKX|Bitfinex|Gemini)(?: |$)/;
+
+/**
+ * Independently verify launch-candidate eligibility from a snapshot protocol:
+ * protocol records no token (gecko_id and symbol both null) and fails none of
+ * the wrapped, bridged, versioned, or exchange-product exclusion tests.
+ */
+function candidateExclusionReasons(p) {
+  const reasons = [];
+  if (p.gecko_id !== null || p.symbol !== null) {
+    reasons.push(`records a token (gecko_id=${JSON.stringify(p.gecko_id)}, symbol=${JSON.stringify(p.symbol)})`);
+  }
+  if (p.category !== null && EXCLUDED_CATEGORIES.has(p.category)) {
+    reasons.push(`excluded category "${p.category}"`);
+  }
+  if (typeof p.name === 'string') {
+    if (VERSION_MARKER_RE.test(p.name)) {
+      reasons.push(`version marker in name "${p.name}"`);
+    }
+    if (WRAPPED_OR_STAKED_RE.test(p.name)) {
+      reasons.push(`wrapped/staked/staking in name "${p.name}"`);
+    }
+    if (EXCHANGE_PREFIX_RE.test(p.name)) {
+      reasons.push(`exchange prefix in name "${p.name}"`);
+    }
+  }
+  return reasons;
+}
+
 function resolveArgs(argv) {
   let boardPath = null;
   let snapshotPath = null;
@@ -129,6 +168,7 @@ function main() {
   }
 
   let watchlistCount = 0;
+  let candidateChecked = false;
   if (snapshotPath) {
     if (!existsSync(snapshotPath)) {
       fail(`snapshot file not found: ${snapshotPath}`);
@@ -139,6 +179,29 @@ function main() {
       for (const slug of watchlist) {
         if (!seenSlugs.has(slug)) {
           fail(`watchlist slug "${slug}" missing from board.json`);
+        }
+      }
+
+      const protocolsBySlug = new Map();
+      if (Array.isArray(snap.protocols)) {
+        for (const p of snap.protocols) {
+          if (p && typeof p.slug === 'string') {
+            protocolsBySlug.set(p.slug, p);
+          }
+        }
+      }
+      candidateChecked = true;
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+        if (!row || typeof row.slug !== 'string') continue;
+        const proto = protocolsBySlug.get(row.slug);
+        if (!proto) {
+          fail(`row[${i}] (${row.slug}) not found in snapshot protocols`);
+          continue;
+        }
+        const reasons = candidateExclusionReasons(proto);
+        if (reasons.length > 0) {
+          fail(`row[${i}] (${row.slug}) is not a launch candidate: ${reasons.join('; ')}`);
         }
       }
     }
@@ -154,6 +217,7 @@ function main() {
 
   console.log(
     `PASS: ${rows.length} rows, ${watchlistCount}/${watchlistCount} watchlist slugs present, ` +
+      `${candidateChecked ? 'all rows pass launch-candidate tests, ' : ''}` +
       `ranks 1..${rows.length}, implied_value_usd strictly decreasing, ` +
       `farm_steps length ${minStepLen}..${maxStepLen} chars, size ${sizeBytes} bytes`,
   );

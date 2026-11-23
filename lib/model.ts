@@ -65,6 +65,33 @@ const MATURITY_NULL_FACTOR = 0.95;
 const MATURITY_TAU_DAYS = 540;
 const MS_PER_DAY = 86_400_000;
 
+const EXCLUDED_CATEGORIES = new Set<string>([
+  'Bridge',
+  'Canonical Bridge',
+  'Liquid Staking',
+  'Liquid Restaking',
+  'Restaked BTC',
+  'CEX',
+]);
+const VERSION_MARKER_RE = / [Vv]?\d+(?:\.\d+)?$/;
+const WRAPPED_OR_STAKED_RE = /\b(?:wrapped|staked|staking)\b/i;
+const EXCHANGE_PREFIX_RE = /^(?:Binance|Coinbase|Bybit|Kraken|Bitget|OKX|Bitfinex|Gemini)(?: |$)/;
+
+/**
+ * Determine whether a snapshot protocol is a token-launch candidate.
+ * A protocol qualifies only when it records no token (both `gecko_id` and
+ * `symbol` are null) and does not match wrapped, bridged, versioned, or
+ * exchange-product exclusion rules.
+ */
+export function isLaunchCandidate(p: Protocol): boolean {
+  if (p.gecko_id !== null || p.symbol !== null) return false;
+  if (p.category !== null && EXCLUDED_CATEGORIES.has(p.category)) return false;
+  if (VERSION_MARKER_RE.test(p.name)) return false;
+  if (WRAPPED_OR_STAKED_RE.test(p.name)) return false;
+  if (EXCHANGE_PREFIX_RE.test(p.name)) return false;
+  return true;
+}
+
 function clamp(value: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, value));
 }
@@ -649,9 +676,10 @@ export function buildBoard(snapshot: Snapshot): BoardResult {
   const multiples = computeCategoryMultiples(snapshot.protocols);
   const watchlistSet = new Set(snapshot.watchlist);
 
-  const preToken = snapshot.protocols.filter((p) => p.gecko_id === null && p.symbol === null);
+  // Select launch candidates that record no token and are not wrapped/bridged/exchange products.
+  const candidates = snapshot.protocols.filter(isLaunchCandidate);
 
-  const draftRows: BoardRow[] = preToken.map((p) => {
+  const draftRows: BoardRow[] = candidates.map((p) => {
     const category = p.category ?? 'Uncategorized';
     const catInfo = multiples.by_category[category];
     const mult = catInfo ? catInfo.multiple : clamp(multiples.global_median, MIN_MULTIPLE, MAX_MULTIPLE);
