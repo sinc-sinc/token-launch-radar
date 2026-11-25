@@ -289,9 +289,9 @@ function main() {
     const probeScript =
       `<script>window.addEventListener("load",()=>{const m={};` +
       `const trs=[...document.querySelectorAll(".tbl tbody tr")];` +
-      `if(trs.length){m.tableRows=trs.length;m.fullyVis900=trs.filter(r=>r.getBoundingClientRect().bottom<=${WINDOW_HEIGHT}).length;m.slugs=trs.slice(0,5).map(r=>r.dataset.slug||"");}` +
+      `if(trs.length){m.tableRows=trs.length;m.fullyVis900=trs.filter(r=>r.getBoundingClientRect().bottom<=${WINDOW_HEIGHT}).length;m.slugs=trs.slice(0,5).map(r=>r.dataset.slug||"");m.visSlugs=trs.filter(r=>r.getBoundingClientRect().bottom<=${WINDOW_HEIGHT}).map(r=>r.dataset.slug||"");m.legend=(document.getElementById("scl")?.textContent||"").trim();}` +
       `const steps=[...document.querySelectorAll("#farm-timeline li")];` +
-      `if(steps.length){m.steps=steps.length;m.lastStepBottom=Math.round(steps[steps.length-1].getBoundingClientRect().bottom);m.farmPanelBottom=Math.round(document.getElementById("farm-panel").getBoundingClientRect().bottom);m.whyTotalBottom=Math.round(document.getElementById("why-total").getBoundingClientRect().bottom);m.whyPanelBottom=Math.round(document.getElementById("why-panel").getBoundingClientRect().bottom);m.peerRows=document.querySelectorAll(".ptbl tbody tr").length;}` +
+      `if(steps.length){m.steps=steps.length;m.lastStepBottom=Math.round(steps[steps.length-1].getBoundingClientRect().bottom);m.farmPanelBottom=Math.round(document.getElementById("farm-panel").getBoundingClientRect().bottom);m.whyTotalBottom=Math.round(document.getElementById("why-total").getBoundingClientRect().bottom);m.whyPanelBottom=Math.round(document.getElementById("why-panel").getBoundingClientRect().bottom);const pr=[...document.querySelectorAll(".ptbl tbody tr")];m.peerRows=pr.length;m.peerCols=pr[0]?[...pr[0].querySelectorAll("td")].map(td=>td.textContent.trim()):[];const ps=document.querySelector(".ps");m.psHeight=ps?Math.round(ps.getBoundingClientRect().height):0;m.psText=ps?ps.textContent.trim():"";const sTexts=steps.map(li=>li.querySelector(".tlt")?.textContent||"");m.s1Wk=(sTexts[0].match(/~(\\d+)\\s*min\\/week/i)||[])[1]||null;m.s4Wk=(sTexts[3].match(/~(\\d+)\\s*min\\s+weekly/i)||[])[1]||null;}` +
       `const el=document.createElement("pre");el.id="LAYOUT_PROBE";el.textContent=JSON.stringify(m);document.body.appendChild(el);});</script>`;
     writeFileSync(htmlPath, origHtml.replace('</body>', `${probeScript}</body>`), 'utf8');
 
@@ -299,9 +299,11 @@ function main() {
     const detailProbe = probeLayout(previewDir, targets[1].hash);
     const filtProbe = probeLayout(previewDir, targets[2].hash);
     const top5Set = new Set(boardProbe.slugs || []);
+    const visSet = new Set(boardProbe.visSlugs || []);
     const overlapCount = (filtProbe.slugs || []).filter((s) => s && top5Set.has(s)).length;
+    const visOverlapCount = (filtProbe.visSlugs || []).filter((s) => s && visSet.has(s)).length;
 
-    layoutReport = { boardProbe, detailProbe, filtProbe, overlapCount };
+    layoutReport = { boardProbe, detailProbe, filtProbe, overlapCount, visOverlapCount };
 
     if ((boardProbe.fullyVis900 ?? 0) < MIN_VISIBLE_BOARD_ROWS) {
       console.error(`ERROR: 01-board shows only ${boardProbe.fullyVis900} full rows in ${WINDOW_HEIGHT}px (< ${MIN_VISIBLE_BOARD_ROWS})`);
@@ -319,6 +321,14 @@ function main() {
       console.error(
         `ERROR: 02-detail left panel clipped: whyTotalBottom=${detailProbe.whyTotalBottom}, whyPanelBottom=${detailProbe.whyPanelBottom} > ${WINDOW_HEIGHT}`,
       );
+      hadFailure = true;
+    }
+    if (detailProbe.s1Wk && detailProbe.s4Wk && detailProbe.s1Wk !== detailProbe.s4Wk) {
+      console.error(`ERROR: 02-detail Step 1 (${detailProbe.s1Wk}m/wk) != Step 4 (${detailProbe.s4Wk}m/wk)`);
+      hadFailure = true;
+    }
+    if (!String(filtProbe.legend || '').includes('Top 5 matches')) {
+      console.error(`ERROR: 03-filtered scatter legend missing "Top 5 matches": ${filtProbe.legend}`);
       hadFailure = true;
     }
     if (overlapCount > 0) {
@@ -345,7 +355,9 @@ function main() {
     `DOM layout check: board_visible_rows=${layoutReport.boardProbe?.fullyVis900}, detail_steps=${layoutReport.detailProbe?.steps}, ` +
       `last_step_bottom=${layoutReport.detailProbe?.lastStepBottom}px (<= ${WINDOW_HEIGHT}px), ` +
       `why_total_bottom=${layoutReport.detailProbe?.whyTotalBottom}px, why_panel_bottom=${layoutReport.detailProbe?.whyPanelBottom}px, ` +
-      `detail_peers=${layoutReport.detailProbe?.peerRows}, filtered_top5_overlap=${layoutReport.overlapCount}/5`,
+      `detail_peers=${layoutReport.detailProbe?.peerRows} (${(layoutReport.detailProbe?.peerCols || []).join(' | ')}), ` +
+      `detail_timing=${layoutReport.detailProbe?.s1Wk}m==${layoutReport.detailProbe?.s4Wk}m (ps_h=${layoutReport.detailProbe?.psHeight}px), ` +
+      `filtered_top5_overlap=${layoutReport.overlapCount}/5 (vis_overlap=${layoutReport.visOverlapCount}/${layoutReport.filtProbe?.tableRows})`,
   );
 
   if (hadFailure) {
