@@ -37,6 +37,8 @@ export interface MultipleTable {
   global_p75: number;
   multiple_cap: number;
   global_peer_count: number;
+  tvl_elasticity_beta: number;
+  tvl_pivot_usd: number;
   by_category: Record<string, CategoryMultiple>;
 }
 
@@ -55,6 +57,10 @@ export interface ValidationStats {
   within_3x: number;
   within_2x_pct: number;
   within_3x_pct: number;
+  iqr_coverage: number;
+  iqr_coverage_pct: number;
+  rmsle_log10: number;
+  mae_log10: number;
 }
 
 export interface ModelStats {
@@ -64,8 +70,23 @@ export interface ModelStats {
   multiple_cap_p90: number;
   global_peer_count: number;
   shrinkage_weight: number;
+  tvl_elasticity_beta: number;
+  tvl_pivot_usd: number;
   validation: ValidationStats;
   categories: Record<string, CategoryModelStats>;
+}
+
+export interface LivePeer {
+  slug: string;
+  name: string;
+  symbol: string;
+  category: string;
+  chains: string[];
+  tvl_usd: number;
+  mcap_usd: number;
+  raw_multiple: number;
+  norm_multiple: number;
+  change_7d: number | null;
 }
 
 export interface BoardRow {
@@ -76,6 +97,7 @@ export interface BoardRow {
   implied_low_usd: number;
   implied_high_usd: number;
   tvl_usd: number;
+  effective_tvl_usd: number;
   category: string;
   chains: string[];
   change_7d: number | null;
@@ -94,15 +116,19 @@ export interface BoardResult {
   as_of: string;
   floor_usd: number;
   rows: BoardRow[];
+  live_peers: LivePeer[];
   multiples: MultipleTable;
   model_stats: ModelStats;
 }
 
 const MIN_MULTIPLE = 0.05;
 const MULTIPLE_CAP_QUANTILE = 0.9;
-const SHRINKAGE_WEIGHT = 5;
+const SHRINKAGE_WEIGHT = 8;
+const SHRINKAGE_EPS = 1e-6;
+const BETA_MIN = 0.35;
+const BETA_MAX = 1.0;
 const MIN_VALIDATION_TVL_USD = 5_000_000;
-const MATURITY_NULL_FACTOR = 0.95;
+const MATURITY_NULL_FACTOR = 0.99;
 const MATURITY_TAU_DAYS = 540;
 const MS_PER_DAY = 86_400_000;
 
@@ -223,34 +249,88 @@ function hasValidPeerMultiple(p: Protocol): boolean {
   );
 }
 
-function shrinkStatistic(n: number, catValue: number, globalValue: number): number {
-  return (n * catValue + SHRINKAGE_WEIGHT * globalValue) / (n + SHRINKAGE_WEIGHT);
+/** Log-space (geometric) empirical-Bayes shrinkage toward the global benchmark. */
+export function shrinkStatistic(
+  n: number,
+  catValue: number,
+  globalValue: number,
+  k = SHRINKAGE_WEIGHT,
+): number {
+  const c = Math.max(SHRINKAGE_EPS, catValue);
+  const g = Math.max(SHRINKAGE_EPS, globalValue);
+  return Math.exp((n * Math.log(c) + k * Math.log(g)) / (n + k));
 }
 
 /**
- * Derive shrunk mcap/TVL multiples (median, p25, p75) per category directly
- * from the snapshot's tokenised protocols (mcap_usd > 0 and tvl_usd > 0;
- * non-positive mcap_usd entries in DefiLlama represent missing supply data
- * rather than $0 tokens). Upper cap is the data-derived 90th percentile of
- * all tokenised peers' multiples.
+ * Estimate TVL power-law elasticity beta via global OLS on log10(mcap) ~ log10(TVL),
+ * clamped to [0.35, 1.0], together with the geometric-mean TVL pivot.
+ */
+export function fitTvlPowerScaling(
+  peers: ReadonlyArray<{ tvl_usd: number; mcap_usd: number }>,
+): { beta: number; pivot: number } {
+  const n = peers.length;
+  if (n === 0) return { beta: 1, pivot: 1 };
+  let sumLnTvl = 0;
+  let sumX = 0;
+  let sumY = 0;
+  for (const p of peers) {
+    sumLnTvl += Math.log(p.tvl_usd);
+    sumX += Math.log10(p.tvl_usd);
+    sumY += Math.log10(p.mcap_usd);
+  }
+  const pivot = Math.exp(sumLnTvl / n);
+  if (n < 2) return { beta: 1, pivot };
+  const meanX = sumX / n;
+  const meanY = sumY / n;
+  let num = 0;
+  let den = 0;
+  for (const p of peers) {
+    const dx = Math.log10(p.tvl_usd) - meanX;
+    const dy = Math.log10(p.mcap_usd) - meanY;
+    num += dx * dy;
+    den += dx * dx;
+  }
+  const beta = den > 0 ? clamp(num / den, BETA_MIN, BETA_MAX) : 1;
+  return { beta, pivot };
+}
+
+/** Effective TVL under power-law scaling anchored at geometric pivot T_bar: T_bar * (T / T_bar)^beta. */
+export function effectiveTvl(tvlUsd: number, pivotUsd: number, beta: number): number {
+  if (!(tvlUsd > 0) || !(pivotUsd > 0)) return Math.max(0, tvlUsd);
+  return pivotUsd * Math.pow(tvlUsd / pivotUsd, beta);
+}
+
+/**
+ * Derive TVL^beta-normalized, pre-Winsorized, log-shrunk multiples (median, p25, p75)
+ * per category directly from the snapshot's tokenised protocols (mcap_usd > 0 and
+ * tvl_usd > 0). Peer ratios r_i = mcap_i / T_eff(TVL_i) are upper-Winsorized at the
+ * data-derived global 90th percentile BEFORE computing category quantiles and shrunk
+ * in log space toward global benchmarks with prior weight k.
  */
 export function computeCategoryMultiples(protocols: readonly Protocol[]): MultipleTable {
-  const allRatios: number[] = [];
-  const ratiosByCategory = new Map<string, number[]>();
+  const validPeers: Array<{ category: string; tvl_usd: number; mcap_usd: number }> = [];
   const allCategories = new Set<string>();
 
   for (const p of protocols) {
     const cat = p.category ?? 'Uncategorized';
     allCategories.add(cat);
     if (hasValidPeerMultiple(p)) {
-      const ratio = p.mcap_usd! / p.tvl_usd;
-      allRatios.push(ratio);
-      const list = ratiosByCategory.get(cat);
-      if (list) {
-        list.push(ratio);
-      } else {
-        ratiosByCategory.set(cat, [ratio]);
-      }
+      validPeers.push({ category: cat, tvl_usd: p.tvl_usd, mcap_usd: p.mcap_usd! });
+    }
+  }
+
+  const { beta, pivot } = fitTvlPowerScaling(validPeers);
+  const allRatios: number[] = [];
+  const ratiosByCategory = new Map<string, number[]>();
+
+  for (const peer of validPeers) {
+    const ratio = peer.mcap_usd / effectiveTvl(peer.tvl_usd, pivot, beta);
+    allRatios.push(ratio);
+    const list = ratiosByCategory.get(peer.category);
+    if (list) {
+      list.push(ratio);
+    } else {
+      ratiosByCategory.set(peer.category, [ratio]);
     }
   }
 
@@ -268,8 +348,8 @@ export function computeCategoryMultiples(protocols: readonly Protocol[]): Multip
 
   const byCategory: Record<string, CategoryMultiple> = {};
   for (const cat of [...allCategories].sort(byCodeUnit)) {
-    const ratios = ratiosByCategory.get(cat) ?? [];
-    const n = ratios.length;
+    const rawRatios = ratiosByCategory.get(cat) ?? [];
+    const n = rawRatios.length;
     if (n === 0) {
       byCategory[cat] = {
         category: cat,
@@ -283,9 +363,10 @@ export function computeCategoryMultiples(protocols: readonly Protocol[]): Multip
         p75_multiple: clampedGlobalP75,
       };
     } else {
-      const catMed = percentile(ratios, 0.5);
-      const catP25 = percentile(ratios, 0.25);
-      const catP75 = percentile(ratios, 0.75);
+      const winsorized = rawRatios.map((r) => Math.min(r, multipleCap));
+      const catMed = percentile(winsorized, 0.5);
+      const catP25 = percentile(winsorized, 0.25);
+      const catP75 = percentile(winsorized, 0.75);
       const med = clamp(shrinkStatistic(n, catMed, globalMedian), MIN_MULTIPLE, multipleCap);
       const p25 = Math.min(med, Math.max(0, shrinkStatistic(n, catP25, globalP25)));
       const p75 = clamp(shrinkStatistic(n, catP75, globalP75), med, multipleCap);
@@ -309,6 +390,8 @@ export function computeCategoryMultiples(protocols: readonly Protocol[]): Multip
     global_p75: globalP75,
     multiple_cap: multipleCap,
     global_peer_count: allRatios.length,
+    tvl_elasticity_beta: beta,
+    tvl_pivot_usd: pivot,
     by_category: byCategory,
   };
 }
@@ -346,12 +429,13 @@ export function computeCategoryLaunchPriors(protocols: readonly Protocol[]): Rec
 
 /**
  * Leave-one-out validation across every tokenised snapshot protocol with
- * TVL >= $5M and a valid positive market cap. Each protocol's market cap is
- * predicted with its category multiple, global median, and p90 cap computed
- * strictly without that protocol.
+ * TVL >= $5M and a valid positive market cap. Each protocol's market cap and
+ * p25-p75 range are predicted with TVL elasticity beta, pivot T_bar, global
+ * quantiles, p90 cap, and pre-Winsorized log-shrunk category multiples
+ * recomputed strictly without that protocol.
  */
 export function computeLeaveOneOutValidation(snapshot: Snapshot): ValidationStats {
-  const peerEntries: Array<{ idx: number; category: string; ratio: number }> = [];
+  const peerEntries: Array<{ idx: number; category: string; tvl_usd: number; mcap_usd: number }> = [];
   const evalIndices: number[] = [];
 
   for (let i = 0; i < snapshot.protocols.length; i++) {
@@ -360,7 +444,8 @@ export function computeLeaveOneOutValidation(snapshot: Snapshot): ValidationStat
       peerEntries.push({
         idx: i,
         category: p.category ?? 'Uncategorized',
-        ratio: p.mcap_usd! / p.tvl_usd,
+        tvl_usd: p.tvl_usd,
+        mcap_usd: p.mcap_usd!,
       });
       if (p.tvl_usd >= MIN_VALIDATION_TVL_USD) {
         evalIndices.push(i);
@@ -376,46 +461,85 @@ export function computeLeaveOneOutValidation(snapshot: Snapshot): ValidationStat
       within_3x: 0,
       within_2x_pct: 0,
       within_3x_pct: 0,
+      iqr_coverage: 0,
+      iqr_coverage_pct: 0,
+      rmsle_log10: 0,
+      mae_log10: 0,
     };
   }
 
   const ratios: number[] = [];
+  let sumSqLogErr = 0;
+  let sumAbsLogErr = 0;
   let within2 = 0;
   let within3 = 0;
+  let insideIqr = 0;
 
   for (const targetIdx of evalIndices) {
     const p = snapshot.protocols[targetIdx]!;
     const targetCat = p.category ?? 'Uncategorized';
-    const otherAll: number[] = [];
-    const otherCat: number[] = [];
+    const others = peerEntries.filter((e) => e.idx !== targetIdx);
+    const { beta, pivot } = fitTvlPowerScaling(others);
 
-    for (const entry of peerEntries) {
-      if (entry.idx === targetIdx) continue;
-      otherAll.push(entry.ratio);
+    const otherAll: number[] = [];
+    const otherCatRaw: number[] = [];
+    for (const entry of others) {
+      const r = entry.mcap_usd / effectiveTvl(entry.tvl_usd, pivot, beta);
+      otherAll.push(r);
       if (entry.category === targetCat) {
-        otherCat.push(entry.ratio);
+        otherCatRaw.push(r);
       }
     }
 
     const globalMed = otherAll.length > 0 ? percentile(otherAll, 0.5) : 1;
+    const globalP25 = otherAll.length > 0 ? percentile(otherAll, 0.25) : 1;
+    const globalP75 = otherAll.length > 0 ? percentile(otherAll, 0.75) : 1;
     const cap = Math.max(
       MIN_MULTIPLE,
       otherAll.length > 0 ? percentile(otherAll, MULTIPLE_CAP_QUANTILE) : 1,
     );
-    const n = otherCat.length;
-    const rawMult = n === 0 ? globalMed : shrinkStatistic(n, percentile(otherCat, 0.5), globalMed);
-    const mult = clamp(rawMult, MIN_MULTIPLE, cap);
+
+    const fbMed = clamp(globalMed, MIN_MULTIPLE, cap);
+    const fbP25 = Math.min(fbMed, Math.max(0, globalP25));
+    const fbP75 = clamp(globalP75, fbMed, cap);
+
+    const n = otherCatRaw.length;
+    let mult: number;
+    let p25Mult: number;
+    let p75Mult: number;
+    if (n === 0) {
+      mult = fbMed;
+      p25Mult = fbP25;
+      p75Mult = fbP75;
+    } else {
+      const winsorCat = otherCatRaw.map((r) => Math.min(r, cap));
+      mult = clamp(shrinkStatistic(n, percentile(winsorCat, 0.5), globalMed), MIN_MULTIPLE, cap);
+      p25Mult = Math.min(mult, Math.max(0, shrinkStatistic(n, percentile(winsorCat, 0.25), globalP25)));
+      p75Mult = clamp(shrinkStatistic(n, percentile(winsorCat, 0.75), globalP75), mult, cap);
+    }
+    if (!(p25Mult > 0 && p75Mult / p25Mult >= 1.25)) {
+      p25Mult = Math.min(p25Mult, fbP25);
+      p75Mult = Math.max(p75Mult, fbP75);
+    }
 
     const factors =
       computeMomentumMult(p.change_7d) *
       computeMaturityMult(p.listed_at, snapshot.as_of) *
       computeBreadthMult(p.chains);
-    const predicted = Math.max(1, Math.round(p.tvl_usd * mult * factors));
+    const tEff = effectiveTvl(p.tvl_usd, pivot, beta);
+    const predicted = Math.max(1, Math.round(tEff * mult * factors));
+    const predLow = Math.max(1, Math.min(Math.floor(predicted * 0.99), Math.round(tEff * p25Mult * factors)));
+    const predHigh = Math.max(Math.ceil(predicted * 1.01), Math.round(tEff * p75Mult * factors));
+
     const ratio = predicted / p.mcap_usd!;
     ratios.push(ratio);
+    const logErr = Math.log10(ratio);
+    sumSqLogErr += logErr * logErr;
+    sumAbsLogErr += Math.abs(logErr);
 
     if (ratio >= 0.5 && ratio <= 2) within2 += 1;
     if (ratio >= 1 / 3 && ratio <= 3) within3 += 1;
+    if (p.mcap_usd! >= predLow && p.mcap_usd! <= predHigh) insideIqr += 1;
   }
 
   const count = ratios.length;
@@ -426,6 +550,10 @@ export function computeLeaveOneOutValidation(snapshot: Snapshot): ValidationStat
     within_3x: round4(within3 / count),
     within_2x_pct: round1((within2 / count) * 100),
     within_3x_pct: round1((within3 / count) * 100),
+    iqr_coverage: round4(insideIqr / count),
+    iqr_coverage_pct: round1((insideIqr / count) * 100),
+    rmsle_log10: round4(Math.sqrt(sumSqLogErr / count)),
+    mae_log10: round4(sumAbsLogErr / count),
   };
 }
 
@@ -438,17 +566,17 @@ export function daysBetweenUtc(startDate: string, endDate: string): number {
 
 export function computeMomentumMult(change7d: number | null): number {
   const clamped = clamp(change7d ?? 0, -30, 50);
-  return 1 + (clamped / 100) * 0.5;
+  return 1 + (clamped / 100) * 0.15;
 }
 
 export function computeMaturityMult(listedAt: string | null, asOf: string): number {
   if (listedAt === null) return MATURITY_NULL_FACTOR;
   const ageDays = daysBetweenUtc(listedAt, asOf);
-  return 0.8 + 0.35 * (1 - Math.exp(-ageDays / MATURITY_TAU_DAYS));
+  return 0.9 + 0.18 * (1 - Math.exp(-ageDays / MATURITY_TAU_DAYS));
 }
 
 export function computeBreadthMult(chains: readonly string[]): number {
-  return chains.length >= 3 ? 1.05 : 1;
+  return chains.length >= 3 ? 1.02 : chains.length === 2 ? 1.0 : 0.98;
 }
 
 export interface CapitalTier {
@@ -941,15 +1069,16 @@ export function buildBoard(snapshot: Snapshot): BoardResult {
     const maturityMult = computeMaturityMult(p.listed_at, snapshot.as_of);
     const breadthMult = computeBreadthMult(p.chains);
     const factors = momentumMult * maturityMult * breadthMult;
+    const tEff = effectiveTvl(p.tvl_usd, multiples.tvl_pivot_usd, multiples.tvl_elasticity_beta);
 
-    const implied = Math.max(1, Math.round(p.tvl_usd * mult * factors));
+    const implied = Math.max(1, Math.round(tEff * mult * factors));
     const impliedLow = Math.max(
       1,
-      Math.min(Math.floor(implied * 0.99), Math.round(p.tvl_usd * p25Mult * factors)),
+      Math.min(Math.floor(implied * 0.99), Math.round(tEff * p25Mult * factors)),
     );
     const impliedHigh = Math.max(
       Math.ceil(implied * 1.01),
-      Math.round(p.tvl_usd * p75Mult * factors),
+      Math.round(tEff * p75Mult * factors),
     );
     const launchPrior = launchPriors[category] ?? 0;
 
@@ -961,6 +1090,7 @@ export function buildBoard(snapshot: Snapshot): BoardResult {
       implied_low_usd: impliedLow,
       implied_high_usd: impliedHigh,
       tvl_usd: p.tvl_usd,
+      effective_tvl_usd: Math.max(1, Math.round(tEff)),
       category,
       chains: [...p.chains],
       change_7d: p.change_7d,
@@ -1050,6 +1180,29 @@ export function buildBoard(snapshot: Snapshot): BoardResult {
     };
   }
 
+  const livePeers: LivePeer[] = snapshot.protocols
+    .filter(hasValidPeerMultiple)
+    .map((p) => {
+      const tEff = effectiveTvl(p.tvl_usd, multiples.tvl_pivot_usd, multiples.tvl_elasticity_beta);
+      return {
+        slug: p.slug,
+        name: p.name,
+        symbol: p.symbol ?? p.gecko_id ?? '—',
+        category: p.category ?? 'Uncategorized',
+        chains: [...p.chains],
+        tvl_usd: p.tvl_usd,
+        mcap_usd: p.mcap_usd!,
+        raw_multiple: round4(p.mcap_usd! / p.tvl_usd),
+        norm_multiple: round4(p.mcap_usd! / tEff),
+        change_7d: p.change_7d,
+      };
+    })
+    .sort((a, b) => {
+      if (b.mcap_usd !== a.mcap_usd) return b.mcap_usd - a.mcap_usd;
+      if (b.tvl_usd !== a.tvl_usd) return b.tvl_usd - a.tvl_usd;
+      return byCodeUnit(a.slug, b.slug);
+    });
+
   const modelStats: ModelStats = {
     global_median_multiple: round4(multiples.global_median),
     global_p25_multiple: round4(multiples.global_p25),
@@ -1057,6 +1210,8 @@ export function buildBoard(snapshot: Snapshot): BoardResult {
     multiple_cap_p90: round4(multiples.multiple_cap),
     global_peer_count: multiples.global_peer_count,
     shrinkage_weight: SHRINKAGE_WEIGHT,
+    tvl_elasticity_beta: round4(multiples.tvl_elasticity_beta),
+    tvl_pivot_usd: Math.round(multiples.tvl_pivot_usd),
     validation,
     categories: categoryStats,
   };
@@ -1065,6 +1220,7 @@ export function buildBoard(snapshot: Snapshot): BoardResult {
     as_of: snapshot.as_of,
     floor_usd: snapshot.floor_usd,
     rows: draftRows,
+    live_peers: livePeers,
     multiples,
     model_stats: modelStats,
   };
