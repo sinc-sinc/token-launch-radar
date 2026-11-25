@@ -53,6 +53,7 @@ export interface CategoryModelStats {
 export interface ValidationStats {
   count: number;
   median_ratio: number;
+  geo_ratio: number;
   within_2x: number;
   within_3x: number;
   within_2x_pct: number;
@@ -61,6 +62,7 @@ export interface ValidationStats {
   iqr_coverage_pct: number;
   rmsle_log10: number;
   mae_log10: number;
+  spearman_rho: number;
 }
 
 export interface ModelStats {
@@ -70,6 +72,8 @@ export interface ModelStats {
   multiple_cap_p90: number;
   global_peer_count: number;
   shrinkage_weight: number;
+  launch_prior_weight: number;
+  global_launch_rate_pct: number;
   tvl_elasticity_beta: number;
   tvl_pivot_usd: number;
   validation: ValidationStats;
@@ -83,6 +87,7 @@ export interface LivePeer {
   category: string;
   chains: string[];
   tvl_usd: number;
+  tvl_sources: number;
   mcap_usd: number;
   raw_multiple: number;
   norm_multiple: number;
@@ -124,6 +129,7 @@ export interface BoardResult {
 const MIN_MULTIPLE = 0.05;
 const MULTIPLE_CAP_QUANTILE = 0.9;
 const SHRINKAGE_WEIGHT = 8;
+const LAUNCH_PRIOR_WEIGHT = 8;
 const SHRINKAGE_EPS = 1e-6;
 const BETA_MIN = 0.35;
 const BETA_MAX = 1.0;
@@ -131,6 +137,11 @@ const MIN_VALIDATION_TVL_USD = 5_000_000;
 const MATURITY_NULL_FACTOR = 0.99;
 const MATURITY_TAU_DAYS = 540;
 const MS_PER_DAY = 86_400_000;
+const FARM_CAPITAL_BASE_USD = 250;
+const FARM_CAPITAL_REF_TVL_USD = 5_000_000;
+const FARM_CAPITAL_EXPONENT = 0.45;
+const FARM_SCORE_MIN = 5;
+const FARM_SCORE_MAX = 100;
 
 const EXCLUDED_CATEGORIES = new Set<string>([
   'Bridge',
@@ -249,6 +260,85 @@ function hasValidPeerMultiple(p: Protocol): boolean {
   );
 }
 
+interface SplitTvlEntry {
+  totalTvl: number;
+  recordCount: number;
+  mcapCount: number;
+}
+
+/**
+ * Data-driven split-TVL aggregator: when DefiLlama splits one protocol across
+ * multiple version records sharing the same normalized (symbol, category) and
+ * attaches the token's full market cap to a single record (e.g. Aave V1-V4,
+ * SushiSwap V2/V3), aggregate TVL across all matching records so peer multiples
+ * reflect total protocol TVL rather than one legacy version.
+ */
+export function buildAggregatedTvlMap(protocols: readonly Protocol[]): Map<string, SplitTvlEntry> {
+  const map = new Map<string, SplitTvlEntry>();
+  for (const p of protocols) {
+    if (p.symbol === null || p.symbol.trim() === '' || !(p.tvl_usd > 0)) continue;
+    const key = `${p.symbol.trim().toUpperCase()}||${p.category ?? 'Uncategorized'}`;
+    let entry = map.get(key);
+    if (!entry) {
+      entry = { totalTvl: 0, recordCount: 0, mcapCount: 0 };
+      map.set(key, entry);
+    }
+    entry.totalTvl += p.tvl_usd;
+    entry.recordCount += 1;
+    if (p.mcap_usd !== null && p.mcap_usd > 0) {
+      entry.mcapCount += 1;
+    }
+  }
+  return map;
+}
+
+export function resolvePeerTvl(
+  p: Protocol,
+  aggMap: ReadonlyMap<string, SplitTvlEntry>,
+): { tvl_usd: number; tvl_sources: number } {
+  if (p.symbol === null || p.symbol.trim() === '') {
+    return { tvl_usd: p.tvl_usd, tvl_sources: 1 };
+  }
+  const key = `${p.symbol.trim().toUpperCase()}||${p.category ?? 'Uncategorized'}`;
+  const entry = aggMap.get(key);
+  if (entry && entry.recordCount >= 2 && entry.mcapCount === 1) {
+    return { tvl_usd: entry.totalTvl, tvl_sources: entry.recordCount };
+  }
+  return { tvl_usd: p.tvl_usd, tvl_sources: 1 };
+}
+
+function spearmanRho(xs: readonly number[], ys: readonly number[]): number {
+  const n = xs.length;
+  if (n < 2 || ys.length !== n) return 0;
+  const rankify = (vals: readonly number[]): number[] => {
+    const idx = vals.map((v, i) => [v, i] as const).sort((a, b) => a[0] - b[0]);
+    const ranks = new Array<number>(n);
+    for (let i = 0; i < n; ) {
+      let j = i;
+      while (j + 1 < n && idx[j + 1]![0] === idx[i]![0]) j++;
+      const avgRank = (i + j) / 2 + 1;
+      for (let k = i; k <= j; k++) ranks[idx[k]![1]] = avgRank;
+      i = j + 1;
+    }
+    return ranks;
+  };
+  const rx = rankify(xs);
+  const ry = rankify(ys);
+  const mx = rx.reduce((s, v) => s + v, 0) / n;
+  const my = ry.reduce((s, v) => s + v, 0) / n;
+  let num = 0;
+  let dx2 = 0;
+  let dy2 = 0;
+  for (let i = 0; i < n; i++) {
+    const a = rx[i]! - mx;
+    const b = ry[i]! - my;
+    num += a * b;
+    dx2 += a * a;
+    dy2 += b * b;
+  }
+  return dx2 > 0 && dy2 > 0 ? num / Math.sqrt(dx2 * dy2) : 0;
+}
+
 /** Log-space (geometric) empirical-Bayes shrinkage toward the global benchmark. */
 export function shrinkStatistic(
   n: number,
@@ -308,6 +398,7 @@ export function effectiveTvl(tvlUsd: number, pivotUsd: number, beta: number): nu
  * in log space toward global benchmarks with prior weight k.
  */
 export function computeCategoryMultiples(protocols: readonly Protocol[]): MultipleTable {
+  const aggTvlMap = buildAggregatedTvlMap(protocols);
   const validPeers: Array<{ category: string; tvl_usd: number; mcap_usd: number }> = [];
   const allCategories = new Set<string>();
 
@@ -315,7 +406,8 @@ export function computeCategoryMultiples(protocols: readonly Protocol[]): Multip
     const cat = p.category ?? 'Uncategorized';
     allCategories.add(cat);
     if (hasValidPeerMultiple(p)) {
-      validPeers.push({ category: cat, tvl_usd: p.tvl_usd, mcap_usd: p.mcap_usd! });
+      const { tvl_usd } = resolvePeerTvl(p, aggTvlMap);
+      validPeers.push({ category: cat, tvl_usd, mcap_usd: p.mcap_usd! });
     }
   }
 
@@ -396,67 +488,102 @@ export function computeCategoryMultiples(protocols: readonly Protocol[]): Multip
   };
 }
 
+export interface LaunchPriorResult {
+  priors: Record<string, number>;
+  globalRatePct: number;
+  cleanTotal: number;
+  cleanTokenized: number;
+}
+
 /**
- * Per-category launch prior: share (%) of snapshot protocols with TVL >= $5M
- * in that category that already have a token, rounded to 1 decimal.
+ * Per-category launch prior (%) using a clean denominator (>= $5M TVL protocols
+ * that are either non-excluded tokenised protocols or launch candidates) with
+ * Beta-Binomial empirical-Bayes smoothing (prior weight LAUNCH_PRIOR_WEIGHT = 8)
+ * toward the snapshot's global tokenised share.
  */
-export function computeCategoryLaunchPriors(protocols: readonly Protocol[]): Record<string, number> {
+export function computeCategoryLaunchPriorsDetailed(protocols: readonly Protocol[]): LaunchPriorResult {
   const counts = new Map<string, { total: number; tokenized: number }>();
   const allCategories = new Set<string>();
+  let cleanTotal = 0;
+  let cleanTokenized = 0;
 
   for (const p of protocols) {
     const cat = p.category ?? 'Uncategorized';
     allCategories.add(cat);
     if (p.tvl_usd < MIN_VALIDATION_TVL_USD) continue;
+    const isCleanTokenized =
+      isTokenized(p) && !(p.category !== null && EXCLUDED_CATEGORIES.has(p.category));
+    const isCleanCandidate = isLaunchCandidate(p);
+    if (!isCleanTokenized && !isCleanCandidate) continue;
+
     let entry = counts.get(cat);
     if (!entry) {
       entry = { total: 0, tokenized: 0 };
       counts.set(cat, entry);
     }
     entry.total += 1;
+    cleanTotal += 1;
     if (isTokenized(p)) {
       entry.tokenized += 1;
+      cleanTokenized += 1;
     }
   }
 
+  const globalRate = cleanTotal > 0 ? cleanTokenized / cleanTotal : 0.5;
   const priors: Record<string, number> = {};
   for (const cat of [...allCategories].sort(byCodeUnit)) {
     const entry = counts.get(cat);
-    priors[cat] = entry && entry.total > 0 ? round1((entry.tokenized / entry.total) * 100) : 0;
+    const total = entry ? entry.total : 0;
+    const tokenized = entry ? entry.tokenized : 0;
+    const smoothed =
+      ((tokenized + LAUNCH_PRIOR_WEIGHT * globalRate) / (total + LAUNCH_PRIOR_WEIGHT)) * 100;
+    priors[cat] = round1(smoothed);
   }
-  return priors;
+  return {
+    priors,
+    globalRatePct: round1(globalRate * 100),
+    cleanTotal,
+    cleanTokenized,
+  };
+}
+
+export function computeCategoryLaunchPriors(protocols: readonly Protocol[]): Record<string, number> {
+  return computeCategoryLaunchPriorsDetailed(protocols).priors;
 }
 
 /**
  * Leave-one-out validation across every tokenised snapshot protocol with
- * TVL >= $5M and a valid positive market cap. Each protocol's market cap and
- * p25-p75 range are predicted with TVL elasticity beta, pivot T_bar, global
+ * TVL >= $5M and a valid positive market cap. Uses split-TVL aggregation for
+ * multi-version peers and recomputes TVL elasticity beta, pivot T_bar, global
  * quantiles, p90 cap, and pre-Winsorized log-shrunk category multiples
- * recomputed strictly without that protocol.
+ * strictly without each held-out protocol.
  */
 export function computeLeaveOneOutValidation(snapshot: Snapshot): ValidationStats {
+  const aggTvlMap = buildAggregatedTvlMap(snapshot.protocols);
   const peerEntries: Array<{ idx: number; category: string; tvl_usd: number; mcap_usd: number }> = [];
-  const evalIndices: number[] = [];
+  const evalEntries: Array<{ idx: number; tvl_usd: number }> = [];
 
   for (let i = 0; i < snapshot.protocols.length; i++) {
     const p = snapshot.protocols[i]!;
     if (hasValidPeerMultiple(p)) {
+      const { tvl_usd } = resolvePeerTvl(p, aggTvlMap);
       peerEntries.push({
         idx: i,
         category: p.category ?? 'Uncategorized',
-        tvl_usd: p.tvl_usd,
+        tvl_usd,
         mcap_usd: p.mcap_usd!,
       });
       if (p.tvl_usd >= MIN_VALIDATION_TVL_USD) {
-        evalIndices.push(i);
+        evalEntries.push({ idx: i, tvl_usd });
       }
     }
   }
 
-  if (evalIndices.length === 0) {
+  if (evalEntries.length === 0) {
     return {
       count: 0,
       median_ratio: 0,
+      geo_ratio: 0,
       within_2x: 0,
       within_3x: 0,
       within_2x_pct: 0,
@@ -465,20 +592,24 @@ export function computeLeaveOneOutValidation(snapshot: Snapshot): ValidationStat
       iqr_coverage_pct: 0,
       rmsle_log10: 0,
       mae_log10: 0,
+      spearman_rho: 0,
     };
   }
 
   const ratios: number[] = [];
+  const predictedList: number[] = [];
+  const actualList: number[] = [];
+  let sumLogErr = 0;
   let sumSqLogErr = 0;
   let sumAbsLogErr = 0;
   let within2 = 0;
   let within3 = 0;
   let insideIqr = 0;
 
-  for (const targetIdx of evalIndices) {
-    const p = snapshot.protocols[targetIdx]!;
+  for (const target of evalEntries) {
+    const p = snapshot.protocols[target.idx]!;
     const targetCat = p.category ?? 'Uncategorized';
-    const others = peerEntries.filter((e) => e.idx !== targetIdx);
+    const others = peerEntries.filter((e) => e.idx !== target.idx);
     const { beta, pivot } = fitTvlPowerScaling(others);
 
     const otherAll: number[] = [];
@@ -526,14 +657,17 @@ export function computeLeaveOneOutValidation(snapshot: Snapshot): ValidationStat
       computeMomentumMult(p.change_7d) *
       computeMaturityMult(p.listed_at, snapshot.as_of) *
       computeBreadthMult(p.chains);
-    const tEff = effectiveTvl(p.tvl_usd, pivot, beta);
+    const tEff = effectiveTvl(target.tvl_usd, pivot, beta);
     const predicted = Math.max(1, Math.round(tEff * mult * factors));
     const predLow = Math.max(1, Math.min(Math.floor(predicted * 0.99), Math.round(tEff * p25Mult * factors)));
     const predHigh = Math.max(Math.ceil(predicted * 1.01), Math.round(tEff * p75Mult * factors));
 
     const ratio = predicted / p.mcap_usd!;
     ratios.push(ratio);
+    predictedList.push(predicted);
+    actualList.push(p.mcap_usd!);
     const logErr = Math.log10(ratio);
+    sumLogErr += logErr;
     sumSqLogErr += logErr * logErr;
     sumAbsLogErr += Math.abs(logErr);
 
@@ -546,6 +680,7 @@ export function computeLeaveOneOutValidation(snapshot: Snapshot): ValidationStat
   return {
     count,
     median_ratio: round4(median(ratios)),
+    geo_ratio: round4(Math.pow(10, sumLogErr / count)),
     within_2x: round4(within2 / count),
     within_3x: round4(within3 / count),
     within_2x_pct: round1((within2 / count) * 100),
@@ -554,6 +689,7 @@ export function computeLeaveOneOutValidation(snapshot: Snapshot): ValidationStat
     iqr_coverage_pct: round1((insideIqr / count) * 100),
     rmsle_log10: round4(Math.sqrt(sumSqLogErr / count)),
     mae_log10: round4(sumAbsLogErr / count),
+    spearman_rho: round4(spearmanRho(predictedList, actualList)),
   };
 }
 
@@ -1041,10 +1177,18 @@ export function buildFarmSteps(p: Protocol): string[] {
   }
 }
 
+/** Smooth capital curve matching the tier schedule ($250 at $5M -> ~$2,000 at $500M) without step cliffs. */
+export function smoothFarmCapitalUsd(tvlUsd: number): number {
+  const scaled = Math.max(tvlUsd, FARM_CAPITAL_REF_TVL_USD) / FARM_CAPITAL_REF_TVL_USD;
+  return FARM_CAPITAL_BASE_USD * Math.pow(scaled, FARM_CAPITAL_EXPONENT);
+}
+
 /** Build the full ranked token-launch radar board from a sealed snapshot. */
 export function buildBoard(snapshot: Snapshot): BoardResult {
+  const aggTvlMap = buildAggregatedTvlMap(snapshot.protocols);
   const multiples = computeCategoryMultiples(snapshot.protocols);
-  const launchPriors = computeCategoryLaunchPriors(snapshot.protocols);
+  const priorInfo = computeCategoryLaunchPriorsDetailed(snapshot.protocols);
+  const launchPriors = priorInfo.priors;
   const validation = computeLeaveOneOutValidation(snapshot);
   const watchlistSet = new Set(snapshot.watchlist);
 
@@ -1080,7 +1224,7 @@ export function buildBoard(snapshot: Snapshot): BoardResult {
       Math.ceil(implied * 1.01),
       Math.round(tEff * p75Mult * factors),
     );
-    const launchPrior = launchPriors[category] ?? 0;
+    const launchPrior = launchPriors[category] ?? priorInfo.globalRatePct;
 
     return {
       slug: p.slug,
@@ -1131,8 +1275,8 @@ export function buildBoard(snapshot: Snapshot): BoardResult {
       Math.ceil(row.implied_value_usd * 1.01),
     );
 
-    const tier = getCapitalTier(row.tvl_usd);
-    rawFarmScores.push((row.implied_value_usd * row.launch_prior) / 100 / tier.capitalUsd);
+    const smoothCap = smoothFarmCapitalUsd(row.tvl_usd);
+    rawFarmScores.push((row.implied_value_usd * row.launch_prior) / 100 / smoothCap);
   }
 
   const positiveLogs: number[] = [];
@@ -1147,23 +1291,21 @@ export function buildBoard(snapshot: Snapshot): BoardResult {
       row.farm_score = 50;
     }
   } else {
-    let minLog = Infinity;
-    let maxLog = -Infinity;
-    for (const logVal of positiveLogs) {
-      if (logVal < minLog) minLog = logVal;
-      if (logVal > maxLog) maxLog = logVal;
-    }
-    const span = maxLog - minLog;
+    const loLog = percentile(positiveLogs, 0.01);
+    const hiLog = percentile(positiveLogs, 0.99);
+    const span = hiLog - loLog;
     for (let i = 0; i < draftRows.length; i++) {
       const row = draftRows[i]!;
       const raw = rawFarmScores[i]!;
       if (raw <= 0) {
-        row.farm_score = 1;
-      } else if (span === 0) {
+        row.farm_score = FARM_SCORE_MIN;
+      } else if (span <= 0) {
         row.farm_score = 50;
       } else {
-        const scaled = 1 + (99 * (Math.log10(raw) - minLog)) / span;
-        row.farm_score = clamp(Math.round(scaled), 1, 100);
+        const clampedLog = clamp(Math.log10(raw), loLog, hiLog);
+        const scaled =
+          FARM_SCORE_MIN + ((FARM_SCORE_MAX - FARM_SCORE_MIN) * (clampedLog - loLog)) / span;
+        row.farm_score = clamp(Math.round(scaled), FARM_SCORE_MIN, FARM_SCORE_MAX);
       }
     }
   }
@@ -1176,23 +1318,25 @@ export function buildBoard(snapshot: Snapshot): BoardResult {
       median_multiple: round4(info.multiple),
       p25_multiple: round4(info.p25_multiple),
       p75_multiple: round4(info.p75_multiple),
-      launch_prior: launchPriors[cat] ?? 0,
+      launch_prior: launchPriors[cat] ?? priorInfo.globalRatePct,
     };
   }
 
   const livePeers: LivePeer[] = snapshot.protocols
     .filter(hasValidPeerMultiple)
     .map((p) => {
-      const tEff = effectiveTvl(p.tvl_usd, multiples.tvl_pivot_usd, multiples.tvl_elasticity_beta);
+      const { tvl_usd, tvl_sources } = resolvePeerTvl(p, aggTvlMap);
+      const tEff = effectiveTvl(tvl_usd, multiples.tvl_pivot_usd, multiples.tvl_elasticity_beta);
       return {
         slug: p.slug,
         name: p.name,
         symbol: p.symbol ?? p.gecko_id ?? '—',
         category: p.category ?? 'Uncategorized',
         chains: [...p.chains],
-        tvl_usd: p.tvl_usd,
+        tvl_usd,
+        tvl_sources,
         mcap_usd: p.mcap_usd!,
-        raw_multiple: round4(p.mcap_usd! / p.tvl_usd),
+        raw_multiple: round4(p.mcap_usd! / tvl_usd),
         norm_multiple: round4(p.mcap_usd! / tEff),
         change_7d: p.change_7d,
       };
@@ -1210,6 +1354,8 @@ export function buildBoard(snapshot: Snapshot): BoardResult {
     multiple_cap_p90: round4(multiples.multiple_cap),
     global_peer_count: multiples.global_peer_count,
     shrinkage_weight: SHRINKAGE_WEIGHT,
+    launch_prior_weight: LAUNCH_PRIOR_WEIGHT,
+    global_launch_rate_pct: priorInfo.globalRatePct,
     tvl_elasticity_beta: round4(multiples.tvl_elasticity_beta),
     tvl_pivot_usd: Math.round(multiples.tvl_pivot_usd),
     validation,
