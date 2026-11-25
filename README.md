@@ -4,17 +4,17 @@
 [![rank](https://make.fun/badge/token-radar-01/sinc-sinc/token-launch-radar/rank.svg)](https://make.fun/bounty/token-radar-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
 [![reward](https://make.fun/badge/token-radar-01/sinc-sinc/token-launch-radar/reward.svg)](https://make.fun/bounty/token-radar-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
 
-Token Launch Radar ranks pre-token DeFi protocols from a sealed on-chain snapshot and ships a static offline dashboard (with model card, TVL-vs-implied-value scatter plot, category/chain filters, and protocol-specific farming plans).
+Token Launch Radar ranks pre-token DeFi protocols from a sealed on-chain snapshot and ships a static offline dashboard (model card, log-log TVL scatter plot, separated Pre-Token Radar / Live Token Peers views, category/chain/watchlist filters, category peer comparison tables, and protocol-specific farming plans).
 
-## Model (v2)
+## Model (v3)
 
 All valuation parameters are derived directly from the sealed snapshot:
 
-- **Category multiples:** median market-cap-to-TVL ratio of tokenised peers in each category, shrunk toward the global peer median (`0.2138×` across 128 tokenised peers) with `(n + 5)` weighting and capped at the data-derived 90th percentile of all peer multiples (`2.9555×`, no flat upper clamp), then adjusted for 7-day TVL momentum, listing maturity, and multi-chain breadth.
-- **Implied valuation ranges:** every protocol receives an `[implied_low_usd, implied_high_usd]` band computed from shrunk category `p25–p75` peer multiples, with a global-quartile widening fallback (`0.0468×–1.0467×`) whenever a category's interquartile spread is narrower than `1.25×`.
-- **Leave-one-out validation:** evaluated across all **128** tokenised protocols with TVL ≥ $5M (recomputing global median, `p90` cap, and category median without the held-out protocol), achieving a median predicted/actual ratio of **1.21** (`1.2062`), with **21.1%** within `2×` and **32.8%** within `3×`.
-- **Launch prior & farm score:** each category carries a **launch prior** (the share of snapshot protocols with TVL ≥ $5M in that category that already have a token), which feeds a **1–100 farm score** index computed as `implied_value_usd × launch_prior ÷ plan_capital_usd`, log-scaled across the board.
-- **Actionable farm plans:** each protocol gets a 5-step farming plan whose step 1 states the TVL-tiered capital budget, expected duration, and weekly time commitment (e.g., `Budget: $2,500 over ~16 weeks, ~15 min/week.`).
+- **TVL power-law scaling:** global OLS on $\log_{10}(\text{mcap}) \sim \log_{10}(\text{TVL})$ across all **128** tokenised peers estimates elasticity $\hat{\beta} = 0.5223$ (clamped to `[0.35, 1.0]`) around the geometric-mean TVL pivot $\bar{T} = \$49.1\text{M}$, defining effective TVL $T_{\text{eff}}(T) = \bar{T}\cdot(T/\bar{T})^{\hat{\beta}}$.
+- **Pre-Winsorized log-space category multiples:** normalized peer ratios $r_i = \text{mcap}_i / T_{\text{eff}}(T_i)$ are upper-Winsorized at the data-derived 90th percentile (`1.9010×`) *before* computing category quantiles (`p50`, `p25`, `p75`), then shrunk geometrically in log space (`k = 8`) toward global benchmarks (`0.2410×` median, `0.0697×–0.9209×` IQR).
+- **Recentered adjustments:** implied values multiply `T_eff × category multiple` by recentered 7-day TVL momentum (`×0.15` weight), listing-age maturity (`0.90–1.08`, `0.99` when unlisted), and multi-chain breadth (`0.98 / 1.00 / 1.02`).
+- **Leave-one-out validation:** evaluated across all **128** tokenised peers with TVL ≥ $5M (recomputing $\hat{\beta}$, $\bar{T}$, global quantiles, `p90` cap, and shrunk category quantiles strictly without each held-out protocol), achieving median predicted/actual **1.09×** (`1.0862`), **32.8%** within `2×`, **43.0%** within `3×`, **43.0%** `p25–p75` IQR coverage, `RMSLE(log10) = 0.9155`, and `MAE(log10) = 0.6919`.
+- **Separated token views & farm plans:** the dashboard separates **Pre-Token Radar (197)** from **Live Token Peers (128)**, shows same-category live peers under each protocol's valuation breakdown, and pairs every candidate with a 5-step TVL-tiered farming plan.
 
 ## Run it
 

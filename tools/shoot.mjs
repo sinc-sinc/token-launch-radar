@@ -8,6 +8,7 @@ import {
   rmSync,
   statSync,
   unlinkSync,
+  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -23,6 +24,7 @@ const WINDOW_HEIGHT = 900;
 const MAX_LONG_SIDE = 1440;
 const MIN_SHORT_SIDE = 800;
 const MAX_BYTES = 512 * 1024;
+const MIN_VISIBLE_BOARD_ROWS = 8;
 
 const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const JPEG_MAGIC = Buffer.from([0xff, 0xd8, 0xff]);
@@ -144,6 +146,19 @@ function shootChrome(url, destPath) {
   );
 }
 
+function probeLayout(previewDir, hash) {
+  const htmlPath = join(previewDir, 'dashboard', 'index.html');
+  const url = `${pathToFileURL(htmlPath).href}${hash}`;
+  const dom = execFileSync(
+    'google-chrome',
+    ['--headless=new', '--dump-dom', `--window-size=${WINDOW_WIDTH},${WINDOW_HEIGHT}`, '--hide-scrollbars', url],
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+  );
+  const m = dom.match(/<pre id="LAYOUT_PROBE">(.*?)<\/pre>/);
+  if (!m) throw new Error(`Layout probe missing for ${hash}`);
+  return JSON.parse(m[1]);
+}
+
 function runGenerator(snapshotPath) {
   mkdirSync(OUT_DIR, { recursive: true });
   execFileSync(process.execPath, [join(REPO_DIR, 'main.ts'), '--input', snapshotPath], {
@@ -153,18 +168,40 @@ function runGenerator(snapshotPath) {
   });
 }
 
-function pickTopWatchlistCategory(rows) {
-  const counts = new Map();
+/**
+ * Pick the highest-count watchlist category that has zero overlap with the
+ * board's top-5 protocols so 03-filtered.png demonstrates distinct filtered data.
+ */
+function pickDistinctFilterCategory(rows) {
+  const top5Slugs = new Set(rows.slice(0, 5).map((r) => r.slug));
+  const stats = new Map();
   for (const r of rows) {
-    if (!r.watchlist) continue;
     const cat = r.category || 'Uncategorized';
-    counts.set(cat, (counts.get(cat) || 0) + 1);
+    let s = stats.get(cat);
+    if (!s) {
+      s = { total: 0, watch: 0, top5Overlap: 0 };
+      stats.set(cat, s);
+    }
+    s.total += 1;
+    if (r.watchlist) s.watch += 1;
+    if (top5Slugs.has(r.slug)) s.top5Overlap += 1;
   }
-  if (counts.size === 0) {
+  const candidates = [...stats.entries()]
+    .filter(([, s]) => s.watch > 0 && s.top5Overlap === 0)
+    .sort((a, b) => b[1].watch - a[1].watch || b[1].total - a[1].total || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+
+  if (candidates.length > 0) {
+    const [category, s] = candidates[0];
+    return { category, watchCount: s.watch, totalCount: s.total, top5Overlap: s.top5Overlap };
+  }
+  const fallback = [...stats.entries()]
+    .filter(([, s]) => s.watch > 0)
+    .sort((a, b) => a[1].top5Overlap - b[1].top5Overlap || b[1].watch - a[1].watch);
+  if (fallback.length === 0) {
     throw new Error('No watchlist protocols found in out/board.json');
   }
-  const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
-  return { category: sorted[0][0], count: sorted[0][1] };
+  const [category, s] = fallback[0];
+  return { category, watchCount: s.watch, totalCount: s.total, top5Overlap: s.top5Overlap };
 }
 
 function main() {
@@ -174,7 +211,7 @@ function main() {
     process.exit(2);
   }
 
-  // 1. Run generator so out/ is current
+  // 1. Run generator so out/dashboard and out/board.json are current
   runGenerator(snapshotPath);
 
   const board = JSON.parse(readFileSync(join(OUT_DIR, 'board.json'), 'utf8'));
@@ -183,7 +220,7 @@ function main() {
     throw new Error('out/board.json has no rows');
   }
   const rank1 = rows.find((r) => r.rank === 1) || rows[0];
-  const topWatchCat = pickTopWatchlistCategory(rows);
+  const filterCat = pickDistinctFilterCategory(rows);
 
   // 2. Copy out/ to a temp preview directory (serve nothing)
   const previewDir = mkdtempSync(join(tmpdir(), 'token-radar-preview-'));
@@ -192,11 +229,12 @@ function main() {
   const targets = [
     { baseName: '01-board', hash: '#/' },
     { baseName: '02-detail', hash: `#/protocol/${encodeURIComponent(rank1.slug)}` },
-    { baseName: '03-filtered', hash: `#/?cat=${encodeURIComponent(topWatchCat.category)}` },
+    { baseName: '03-filtered', hash: `#/?cat=${encodeURIComponent(filterCat.category)}&watch=1` },
   ];
 
   const results = [];
   let hadFailure = false;
+  let layoutReport = {};
 
   try {
     cpSync(OUT_DIR, previewDir, { recursive: true });
@@ -208,7 +246,6 @@ function main() {
       const pngPath = join(SHOTS_DIR, pngName);
       const jpgPath = join(SHOTS_DIR, jpgName);
 
-      // Remove stale sibling if present
       if (existsSync(jpgPath)) unlinkSync(jpgPath);
 
       const url = `${pageUrlBase}${target.hash}`;
@@ -218,7 +255,6 @@ function main() {
       let finalName = pngName;
 
       if (!check.ok && check.tooHeavy) {
-        // Attempt Chrome screenshot directly into .jpg
         shootChrome(url, jpgPath);
         const jpgCheck = verifyImage(jpgPath);
         if (jpgCheck.ok) {
@@ -228,7 +264,7 @@ function main() {
         } else {
           if (existsSync(jpgPath)) unlinkSync(jpgPath);
           console.error(
-            `ERROR: ${pngName} is ${check.size} bytes (> ${MAX_BYTES} bytes) and Chrome JPEG fallback failed (${jpgCheck.error}); cannot reduce short side below ${MIN_SHORT_SIDE}px.`,
+            `ERROR: ${pngName} is ${check.size} bytes (> ${MAX_BYTES} bytes) and Chrome JPEG fallback failed (${jpgCheck.error}).`,
           );
           hadFailure = true;
         }
@@ -246,15 +282,71 @@ function main() {
         ok: check.ok,
       });
     }
+
+    // 3. Automated DOM clipping & density check on temp preview copy
+    const htmlPath = join(previewDir, 'dashboard', 'index.html');
+    const origHtml = readFileSync(htmlPath, 'utf8');
+    const probeScript =
+      `<script>window.addEventListener("load",()=>{const m={};` +
+      `const trs=[...document.querySelectorAll(".tbl tbody tr")];` +
+      `if(trs.length){m.tableRows=trs.length;m.fullyVis900=trs.filter(r=>r.getBoundingClientRect().bottom<=${WINDOW_HEIGHT}).length;m.slugs=trs.slice(0,5).map(r=>r.dataset.slug||"");}` +
+      `const steps=[...document.querySelectorAll("#farm-timeline li")];` +
+      `if(steps.length){m.steps=steps.length;m.lastStepBottom=Math.round(steps[steps.length-1].getBoundingClientRect().bottom);m.farmPanelBottom=Math.round(document.getElementById("farm-panel").getBoundingClientRect().bottom);m.whyTotalBottom=Math.round(document.getElementById("why-total").getBoundingClientRect().bottom);m.whyPanelBottom=Math.round(document.getElementById("why-panel").getBoundingClientRect().bottom);m.peerRows=document.querySelectorAll(".ptbl tbody tr").length;}` +
+      `const el=document.createElement("pre");el.id="LAYOUT_PROBE";el.textContent=JSON.stringify(m);document.body.appendChild(el);});</script>`;
+    writeFileSync(htmlPath, origHtml.replace('</body>', `${probeScript}</body>`), 'utf8');
+
+    const boardProbe = probeLayout(previewDir, targets[0].hash);
+    const detailProbe = probeLayout(previewDir, targets[1].hash);
+    const filtProbe = probeLayout(previewDir, targets[2].hash);
+    const top5Set = new Set(boardProbe.slugs || []);
+    const overlapCount = (filtProbe.slugs || []).filter((s) => s && top5Set.has(s)).length;
+
+    layoutReport = { boardProbe, detailProbe, filtProbe, overlapCount };
+
+    if ((boardProbe.fullyVis900 ?? 0) < MIN_VISIBLE_BOARD_ROWS) {
+      console.error(`ERROR: 01-board shows only ${boardProbe.fullyVis900} full rows in ${WINDOW_HEIGHT}px (< ${MIN_VISIBLE_BOARD_ROWS})`);
+      hadFailure = true;
+    }
+    if ((detailProbe.steps ?? 0) < 5) {
+      console.error(`ERROR: 02-detail rendered ${detailProbe.steps} farm steps (expected 5)`);
+      hadFailure = true;
+    }
+    if ((detailProbe.lastStepBottom ?? Infinity) > WINDOW_HEIGHT) {
+      console.error(`ERROR: 02-detail farm plan clipped: lastStepBottom=${detailProbe.lastStepBottom} > ${WINDOW_HEIGHT}`);
+      hadFailure = true;
+    }
+    if ((detailProbe.whyTotalBottom ?? Infinity) > WINDOW_HEIGHT || (detailProbe.whyPanelBottom ?? Infinity) > WINDOW_HEIGHT) {
+      console.error(
+        `ERROR: 02-detail left panel clipped: whyTotalBottom=${detailProbe.whyTotalBottom}, whyPanelBottom=${detailProbe.whyPanelBottom} > ${WINDOW_HEIGHT}`,
+      );
+      hadFailure = true;
+    }
+    if (overlapCount > 0) {
+      console.error(`ERROR: 03-filtered overlaps ${overlapCount}/5 top rows with 01-board`);
+      hadFailure = true;
+    }
   } finally {
     rmSync(previewDir, { recursive: true, force: true });
   }
 
+  // 4. Re-run generator so out/screenshots and out/dossier.json include the freshly captured PNGs
+  runGenerator(snapshotPath);
+
+  const totalPngBytes = results.reduce((sum, r) => sum + r.bytes, 0);
   console.log(`\nRank 1 protocol: ${rank1.name} (${rank1.slug})`);
-  console.log(`Top watchlist category: ${topWatchCat.category} (${topWatchCat.count} watchlist protocols)\n`);
+  console.log(
+    `Filtered view target: Category="${filterCat.category}" + Watchlist only (${filterCat.watchCount} watchlist / ${filterCat.totalCount} total, top-5 overlap=${filterCat.top5Overlap})\n`,
+  );
   for (const r of results) {
     console.log(`${r.name}  ${r.width}x${r.height}  ${r.bytes} bytes (${(r.bytes / 1024).toFixed(1)} KiB)  ${r.ok ? 'OK' : 'FAIL'}`);
   }
+  console.log(`Total PNG size: ${totalPngBytes} bytes (${(totalPngBytes / 1024).toFixed(1)} KiB)`);
+  console.log(
+    `DOM layout check: board_visible_rows=${layoutReport.boardProbe?.fullyVis900}, detail_steps=${layoutReport.detailProbe?.steps}, ` +
+      `last_step_bottom=${layoutReport.detailProbe?.lastStepBottom}px (<= ${WINDOW_HEIGHT}px), ` +
+      `why_total_bottom=${layoutReport.detailProbe?.whyTotalBottom}px, why_panel_bottom=${layoutReport.detailProbe?.whyPanelBottom}px, ` +
+      `detail_peers=${layoutReport.detailProbe?.peerRows}, filtered_top5_overlap=${layoutReport.overlapCount}/5`,
+  );
 
   if (hadFailure) {
     process.exit(1);
