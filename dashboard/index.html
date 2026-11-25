@@ -1,61 +1,29 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Token Launch Radar</title>
-  <link rel="stylesheet" href="app.css">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Token Launch Radar</title>
+<link rel="stylesheet" href="app.css">
 </head>
 <body>
-  <div class="radar-backdrop" aria-hidden="true"></div>
-  <div class="app-shell">
-    <header class="site-header">
-      <div class="container header-inner">
-        <div class="brand-group">
-          <a href="#/" class="brand-link" aria-label="Token Launch Radar home">
-            <span class="radar-emblem" aria-hidden="true">
-              <span class="radar-ring radar-ring-outer"></span>
-              <span class="radar-ring radar-ring-inner"></span>
-              <span class="radar-sweep"></span>
-              <span class="radar-dot"></span>
-            </span>
-            <span class="brand-text">
-              <span class="brand-kicker">PRE-TOKEN INTELLIGENCE</span>
-              <h1 class="brand-title">Token Launch Radar</h1>
-            </span>
-          </a>
-          <div class="snapshot-meta" id="snapshot-meta">
-            <span class="meta-pill"><span class="meta-label">SNAPSHOT</span> <span class="mono" id="meta-date">--</span></span>
-          </div>
-        </div>
-        <div class="header-stats" id="header-stats" aria-label="Snapshot summary">
-          <div class="kpi-card">
-            <span class="kpi-label">Protocols Tracked</span>
-            <span class="kpi-value num" id="stat-total">--</span>
-          </div>
-          <a href="#/?watch=1" class="kpi-card kpi-card-watch" id="stat-watch-link" title="Filter to watchlist protocols">
-            <span class="kpi-label"><span class="watch-dot" aria-hidden="true"></span>Watchlist</span>
-            <span class="kpi-value num kpi-amber" id="stat-watch">--</span>
-          </a>
-          <div class="kpi-card">
-            <span class="kpi-label">Top-10 Implied Value</span>
-            <span class="kpi-value num kpi-green" id="stat-top10">--</span>
-          </div>
-        </div>
-      </div>
-    </header>
-
-    <main id="app" class="container main-content" tabindex="-1"></main>
-
-    <footer class="site-footer">
-      <div class="container footer-inner">
-        <span class="footer-note">Token Launch Radar &middot; Static offline snapshot &middot; Figures are model estimates, not investment advice.</span>
-        <span class="footer-note mono" id="footer-floor"></span>
-      </div>
-    </footer>
-  </div>
-
-  <script src="zdata.js"></script>
-  <script src="app.js"></script>
+<div class="bg"></div>
+<div class="sh">
+<header class="hdr"><div class="w sb hi">
+<div class="row bgp">
+<a href="#/" class="br"><span class="emb"><span class="rr r1"></span><span class="rr r2"></span><span class="rs"></span><span class="rd"></span></span><span class="col"><span class="kk m">PRE-TOKEN INTELLIGENCE</span><h1 class="tt">Token Launch Radar</h1></span></a>
+<span class="pl m"><span class="i2">SNAPSHOT</span> <span id="md">--</span></span>
+</div>
+<div class="kpis">
+<a href="#/" class="kpi bx"><span class="kl m u">Pre-Token / Live Peers</span><span class="kv num" id="st">--</span></a>
+<a href="#/?watch=1" class="kpi kw bx" id="swl"><span class="kl m u"><span class="wd"></span>Watchlist</span><span class="kv num amb" id="sw">--</span></a>
+<div class="kpi bx"><span class="kl m u">Top-10 Implied Value</span><span class="kv num grn" id="s10">--</span></div>
+</div>
+</div></header>
+<main id="app" class="w mn" tabindex="-1"></main>
+<footer class="ftr"><div class="w sb fi"><span class="fn">Token Launch Radar &middot; Static offline snapshot &middot; Model estimates, not investment advice.</span><span class="fn m" id="ff"></span></div></footer>
+</div>
+<script src="zdata.js"></script>
+<script src="app.js"></script>
 </body>
 </html>
