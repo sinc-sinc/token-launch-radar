@@ -723,11 +723,30 @@ export interface CapitalTier {
   weeks: number;
 }
 
+export type ChainKind =
+  | 'bitcoin'
+  | 'solana'
+  | 'tron'
+  | 'sui'
+  | 'aptos'
+  | 'stellar'
+  | 'algorand'
+  | 'ripple'
+  | 'starknet'
+  | 'stacks'
+  | 'cosmos'
+  | 'other_non_evm'
+  | 'evm_l1'
+  | 'evm_l2';
+
 interface FarmContext {
   slug: string;
   name: string;
   category: string;
   mainChain: string;
+  chainKind: ChainKind;
+  coreAsset: string;
+  feeLabel: string;
   capitalUsd: number;
   capital: string;
   halfCapital: string;
@@ -736,6 +755,170 @@ interface FarmContext {
   weeklyMinutes: number;
   gas: string;
   isEthereum: boolean;
+}
+
+const NATIVE_L1_KEEP = new Set<string>(['Bitcoin', 'Tron']);
+const MAJOR_CHAIN_PRIORITY: readonly string[] = [
+  'Base',
+  'Arbitrum',
+  'Optimism',
+  'Solana',
+  'Polygon',
+  'Avalanche',
+  'Binance',
+  'BSC',
+  'Sui',
+  'Ethereum',
+];
+const KNOWN_EVM_L2_CHAINS = new Set<string>([
+  'Base',
+  'Arbitrum',
+  'Optimism',
+  'Polygon',
+  'Avalanche',
+  'Binance',
+  'BSC',
+  'Hyperliquid L1',
+  'Monad',
+  'Flare',
+  'Arc',
+  'Ink',
+  'Plasma',
+  'Mantle',
+  'Robinhood Chain',
+  'zkSync Era',
+  'Berachain',
+  'BSquared',
+  'Ronin',
+  'Kava',
+  'Manta',
+  'Mezo',
+  'Morph',
+  'Plume Mainnet',
+  'Pharos',
+  'World Chain',
+  'Reya Network',
+  'RSK',
+  'Strato',
+  'Klaytn',
+  'Tempo',
+  'Stable',
+  'Fluent',
+  'RISE',
+  'Bifrost Network',
+  'Linea',
+  'Scroll',
+  'Gnosis',
+  'Celo',
+  'Blast',
+  'Mode',
+  'Sonic',
+  'Fraxtal',
+  'Taiko',
+  'Unichain',
+  'Katana',
+  'Abstract',
+  'Core',
+  'Bob',
+  'Merlin',
+  'Bitlayer',
+  'Corn',
+  'Hemi',
+  'Cronos',
+  'Metis',
+  'Fantom',
+  'Moonbeam',
+  'Astar',
+  'Aurora',
+  'Op_Bnb',
+  'Sophon',
+  'Swellchain',
+]);
+
+/**
+ * Choose a liquid, low-fee primary chain for farming while preserving native
+ * Bitcoin and Tron L1 protocols on their home networks.
+ */
+export function selectPrimaryChain(chains: readonly string[]): string {
+  if (chains.length === 0) return 'Ethereum';
+  const first = chains[0]!;
+  if (NATIVE_L1_KEEP.has(first)) return first;
+  for (const major of MAJOR_CHAIN_PRIORITY) {
+    if (chains.includes(major)) return major;
+  }
+  return first;
+}
+
+export function orderChainsWithPrimary(chains: readonly string[]): string[] {
+  if (chains.length <= 1) return [...chains];
+  const primary = selectPrimaryChain(chains);
+  return [primary, ...chains.filter((c) => c !== primary)];
+}
+
+export function classifyChain(chain: string): ChainKind {
+  switch (chain) {
+    case 'Bitcoin':
+      return 'bitcoin';
+    case 'Solana':
+      return 'solana';
+    case 'Tron':
+      return 'tron';
+    case 'Sui':
+      return 'sui';
+    case 'Aptos':
+      return 'aptos';
+    case 'Stellar':
+      return 'stellar';
+    case 'Algorand':
+      return 'algorand';
+    case 'Ripple':
+      return 'ripple';
+    case 'Starknet':
+      return 'starknet';
+    case 'Stacks':
+      return 'stacks';
+    case 'Noble':
+    case 'XION':
+    case 'Provenance':
+      return 'cosmos';
+    case 'Ethereum':
+      return 'evm_l1';
+    default:
+      return KNOWN_EVM_L2_CHAINS.has(chain) ? 'evm_l2' : 'other_non_evm';
+  }
+}
+
+function chainEconomics(chain: string, kind: ChainKind): { gas: string; coreAsset: string; feeLabel: string } {
+  switch (kind) {
+    case 'bitcoin':
+      return { gas: '$1-$5 per tx', coreAsset: 'BTC', feeLabel: 'network fee' };
+    case 'solana':
+      return { gas: '<$0.01 per tx', coreAsset: 'USDC or SOL', feeLabel: 'fee' };
+    case 'tron':
+      return { gas: '$0.50-$2 per tx', coreAsset: 'USDT or TRX', feeLabel: 'energy fee' };
+    case 'sui':
+      return { gas: '<$0.01 per tx', coreAsset: 'USDC or SUI', feeLabel: 'gas' };
+    case 'aptos':
+      return { gas: '<$0.01 per tx', coreAsset: 'USDC or APT', feeLabel: 'gas' };
+    case 'stellar':
+      return { gas: '<$0.01 per tx', coreAsset: 'USDC or XLM', feeLabel: 'fee' };
+    case 'algorand':
+      return { gas: '<$0.01 per tx', coreAsset: 'USDCa or ALGO', feeLabel: 'fee' };
+    case 'ripple':
+      return { gas: '<$0.01 per tx', coreAsset: 'RLUSD or XRP', feeLabel: 'fee' };
+    case 'starknet':
+      return { gas: '$0.05-$0.50 per tx', coreAsset: 'USDC or ETH', feeLabel: 'fee' };
+    case 'stacks':
+      return { gas: '$0.05-$0.50 per tx', coreAsset: 'sBTC or STX', feeLabel: 'fee' };
+    case 'cosmos':
+      return { gas: '<$0.05 per tx', coreAsset: 'USDC or native IBC assets', feeLabel: 'fee' };
+    case 'other_non_evm':
+      return { gas: '$0.05-$1 per tx', coreAsset: `native ${chain} assets`, feeLabel: 'fee' };
+    case 'evm_l1':
+      return { gas: '$8-$25 per tx', coreAsset: 'USDC or ETH', feeLabel: 'gas' };
+    case 'evm_l2':
+      return { gas: '$0.10-$2 per tx', coreAsset: 'USDC or ETH', feeLabel: 'gas' };
+  }
 }
 
 /** Single source of truth for TVL-banded farm plan capital & duration tiers. */
@@ -754,49 +937,105 @@ export function getCapitalTier(tvlUsd: number): CapitalTier {
 
 function estimateWeeklyMinutes(category: string | null): number {
   const group = resolveCategoryGroup(category);
-  if (group === 'PerpDerivatives' || group === 'Chain' || category === 'Prediction Market') {
+  if (group === 'PerpDerivatives' || group === 'Chain' || group === 'PredictionMarket') {
     return 20;
   }
   return 15;
 }
 
 function makeFarmContext(p: Protocol): FarmContext {
-  const mainChain = p.chains[0] ?? 'Ethereum';
-  const isEthereum = mainChain === 'Ethereum';
+  const mainChain = selectPrimaryChain(p.chains);
+  const chainKind = classifyChain(mainChain);
+  const econ = chainEconomics(mainChain, chainKind);
   const tier = getCapitalTier(p.tvl_usd);
   return {
     slug: p.slug,
     name: p.name,
     category: p.category ?? 'DeFi',
     mainChain,
+    chainKind,
+    coreAsset: econ.coreAsset,
+    feeLabel: econ.feeLabel,
     capitalUsd: tier.capitalUsd,
     capital: tier.capital,
     halfCapital: tier.half,
     quarterCapital: tier.quarter,
     weeks: tier.weeks,
     weeklyMinutes: estimateWeeklyMinutes(p.category),
-    gas: isEthereum ? '$8-$25 per tx' : '$0.10-$2 per tx',
-    isEthereum,
+    gas: econ.gas,
+    isEthereum: chainKind === 'evm_l1',
   };
 }
 
 function step1WalletAndBridge(ctx: FarmContext): string {
   const budgetPrefix = `Budget: ${ctx.capital} over ~${ctx.weeks} weeks, ~${ctx.weeklyMinutes} min/week.`;
-  const templates = [
-    `${budgetPrefix} Create a dedicated wallet for ${ctx.name} on ${ctx.mainChain} and bridge ${ctx.capital} in USDC or native gas via a canonical bridge; est. gas ${ctx.gas}, ~20 min setup.`,
-    `${budgetPrefix} Fund a fresh ${ctx.mainChain} address with ${ctx.capital} plus gas buffer for ${ctx.name} using an audited bridge; expect ${ctx.gas} in fees and ~25 min initial setup.`,
-    `${budgetPrefix} Set up an isolated ${ctx.mainChain} wallet and transfer ${ctx.capital} in liquid collateral for ${ctx.name} interactions; budget ${ctx.gas} in gas and ~20 min onboarding.`,
-    `${budgetPrefix} Configure a clean ${ctx.mainChain} signer and bridge ${ctx.capital} in stablecoins or ETH/native gas for ${ctx.name}; gas cost ${ctx.gas}, ~15 min one-time setup.`,
-  ];
-  return pick(templates, ctx.slug, 's1');
+  switch (ctx.chainKind) {
+    case 'bitcoin':
+      return pick(
+        [
+          `${budgetPrefix} Fund a self-custodial Bitcoin wallet (Sparrow/Xverse) with ${ctx.capital} in BTC for ${ctx.name}; est. ${ctx.feeLabel} ${ctx.gas}, ~20 min setup.`,
+          `${budgetPrefix} Prepare a dedicated Taproot Bitcoin address with ${ctx.capital} in BTC plus UTXO fee buffer for ${ctx.name}; est. ${ctx.feeLabel} ${ctx.gas}, ~20 min setup.`,
+        ],
+        ctx.slug,
+        's1-btc',
+      );
+    case 'solana':
+      return pick(
+        [
+          `${budgetPrefix} Fund a dedicated Solana wallet (Phantom/Backpack) with ${ctx.capital} in USDC plus SOL for ${ctx.name}; est. ${ctx.feeLabel} ${ctx.gas}, ~15 min setup.`,
+          `${budgetPrefix} Set up a clean Solana signer holding ${ctx.capital} in USDC/SOL for ${ctx.name} interactions; est. ${ctx.feeLabel} ${ctx.gas}, ~15 min setup.`,
+        ],
+        ctx.slug,
+        's1-sol',
+      );
+    case 'tron':
+      return `${budgetPrefix} Fund a TronLink wallet with ${ctx.capital} in USDT plus TRX for bandwidth/energy on ${ctx.name}; est. ${ctx.feeLabel} ${ctx.gas}, ~15 min setup.`;
+    case 'sui':
+      return `${budgetPrefix} Fund a Sui wallet (Slush/Suiet) with ${ctx.capital} in USDC plus SUI gas for ${ctx.name}; est. ${ctx.feeLabel} ${ctx.gas}, ~15 min setup.`;
+    case 'aptos':
+      return `${budgetPrefix} Fund an Aptos wallet (Petra/Pontem) with ${ctx.capital} in USDC plus APT gas for ${ctx.name}; est. ${ctx.feeLabel} ${ctx.gas}, ~15 min setup.`;
+    case 'stellar':
+      return `${budgetPrefix} Fund a Stellar wallet (Freighter/Lobstr) with ${ctx.capital} in USDC plus XLM base reserve for ${ctx.name}; est. ${ctx.feeLabel} ${ctx.gas}, ~15 min setup.`;
+    case 'algorand':
+      return `${budgetPrefix} Fund a Pera Algorand wallet with ${ctx.capital} in USDCa plus ALGO gas and opt in to ${ctx.name} assets; est. ${ctx.feeLabel} ${ctx.gas}, ~15 min setup.`;
+    case 'ripple':
+      return `${budgetPrefix} Fund a self-custodial XRPL wallet (Xaman) with ${ctx.capital} in XRP/RLUSD and enable ${ctx.name} trustlines; est. ${ctx.feeLabel} ${ctx.gas}, ~15 min setup.`;
+    case 'starknet':
+      return `${budgetPrefix} Fund a Starknet wallet (Argent X/Braavos) via StarkGate with ${ctx.capital} in USDC plus STRK/ETH fee buffer for ${ctx.name}; est. ${ctx.feeLabel} ${ctx.gas}, ~20 min setup.`;
+    case 'stacks':
+      return `${budgetPrefix} Fund a Stacks wallet (Leather/Xverse) with ${ctx.capital} in sBTC or STX for ${ctx.name}; est. ${ctx.feeLabel} ${ctx.gas}, ~20 min setup.`;
+    case 'cosmos':
+      return `${budgetPrefix} Fund a Keplr/Leap wallet on ${ctx.mainChain} via IBC transfer with ${ctx.capital} plus native gas for ${ctx.name}; est. ${ctx.feeLabel} ${ctx.gas}, ~15 min setup.`;
+    case 'other_non_evm':
+      return `${budgetPrefix} Fund a dedicated ${ctx.mainChain} native wallet with ${ctx.capital} in supported assets plus native fee reserve for ${ctx.name}; est. ${ctx.feeLabel} ${ctx.gas}, ~20 min setup.`;
+    case 'evm_l1':
+      return pick(
+        [
+          `${budgetPrefix} Fund an isolated Ethereum wallet with ${ctx.capital} in USDC/ETH plus mainnet gas buffer for ${ctx.name}; est. gas ${ctx.gas}, ~20 min setup.`,
+          `${budgetPrefix} Prepare a clean Ethereum mainnet signer holding ${ctx.capital} in liquid collateral for ${ctx.name}; est. gas ${ctx.gas}, ~20 min setup.`,
+        ],
+        ctx.slug,
+        's1-l1',
+      );
+    case 'evm_l2':
+      return pick(
+        [
+          `${budgetPrefix} Fund a dedicated ${ctx.mainChain} wallet with ${ctx.capital} in USDC plus gas via an official ${ctx.mainChain} bridge for ${ctx.name}; est. gas ${ctx.gas}, ~20 min setup.`,
+          `${budgetPrefix} Bridge ${ctx.capital} plus gas buffer onto ${ctx.mainChain} into a clean address for ${ctx.name}; est. gas ${ctx.gas}, ~20 min setup.`,
+          `${budgetPrefix} Set up an isolated ${ctx.mainChain} signer and fund ${ctx.capital} in liquid collateral for ${ctx.name}; est. gas ${ctx.gas}, ~20 min setup.`,
+        ],
+        ctx.slug,
+        's1-l2',
+      );
+  }
 }
 
 function step5TrackLaunch(ctx: FarmContext): string {
   const templates = [
     `Track ${ctx.name} announcements on ${ctx.mainChain}, export tx hashes for your ${ctx.capital} position for airdrop claims, and reserve ${ctx.gas} for claiming; ~15 min monthly.`,
-    `Monitor ${ctx.name} governance posts and snapshot notices on ${ctx.mainChain}, archive proofs for your ${ctx.capital} activity, and keep ${ctx.gas} ready to claim; ~20 min monthly.`,
-    `Follow ${ctx.name} official channels for TGE dates on ${ctx.mainChain}, log weekly receipts on your ${ctx.capital} stake, and hold ${ctx.gas} for claim gas; ~15 min monthly.`,
-    `Check ${ctx.name} points dashboards and ${ctx.mainChain} eligibility notices, keep a ledger of your ${ctx.capital} deposits, and budget ${ctx.gas} for claim tx; ~10 min monthly.`,
+    `Monitor ${ctx.name} governance posts and snapshot notices on ${ctx.mainChain}, archive proofs for your ${ctx.capital} activity, and keep ${ctx.gas} ready to claim; ~15 min monthly.`,
+    `Follow ${ctx.name} official channels for TGE dates on ${ctx.mainChain}, log weekly receipts on your ${ctx.capital} stake, and hold ${ctx.gas} for claim ${ctx.feeLabel}; ~15 min monthly.`,
+    `Check ${ctx.name} points dashboards and ${ctx.mainChain} eligibility notices, keep a ledger of your ${ctx.capital} deposits, and budget ${ctx.gas} for claim tx; ~15 min monthly.`,
   ];
   return pick(templates, ctx.slug, 's5');
 }
@@ -804,29 +1043,29 @@ function step5TrackLaunch(ctx: FarmContext): string {
 function farmLending(ctx: FarmContext): string[] {
   const s2 = pick(
     [
-      `Supply ${ctx.capital} of blue-chip collateral into ${ctx.name}'s deepest ${ctx.mainChain} lending market to build deposit duration; gas ${ctx.gas}, ~15 min execution.`,
-      `Deposit ${ctx.capital} in USDC or liquid ETH/stables on ${ctx.name} (${ctx.mainChain}) to activate lender points and interest accrual; est. gas ${ctx.gas}, ~15 min.`,
+      `Supply ${ctx.capital} of ${ctx.coreAsset} into ${ctx.name}'s deepest ${ctx.mainChain} lending market to build deposit duration; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`,
+      `Deposit ${ctx.capital} in ${ctx.coreAsset} on ${ctx.name} (${ctx.mainChain}) to activate lender points and interest accrual; est. ${ctx.feeLabel} ${ctx.gas}, ~15 min.`,
       `Open a primary supply position of ${ctx.capital} in ${ctx.name} on ${ctx.mainChain}, choosing high-utilization reserves for steady score weight; cost ${ctx.gas}, ~20 min.`,
-      `Commit ${ctx.capital} to ${ctx.name}'s core ${ctx.mainChain} money market and verify receipt tokens appear on-chain; est. gas ${ctx.gas}, ~15 min.`,
+      `Commit ${ctx.capital} to ${ctx.name}'s core ${ctx.mainChain} money market and verify receipt tokens appear on-chain; est. ${ctx.feeLabel} ${ctx.gas}, ~15 min.`,
     ],
     ctx.slug,
     'lend-s2',
   );
   const s3 = pick(
     [
-      `Borrow ${ctx.quarterCapital} safely against your ${ctx.capital} ${ctx.name} collateral on ${ctx.mainChain} (keep health factor >2.0) to record borrower activity; gas ${ctx.gas}, ~15 min.`,
-      `Draw a conservative ${ctx.quarterCapital} loan backed by your ${ctx.capital} ${ctx.name} deposit on ${ctx.mainChain} and repay half after 48h for dual-side history; gas ${ctx.gas}, ~20 min.`,
-      `Activate a second market on ${ctx.name} (${ctx.mainChain}) by borrowing ${ctx.quarterCapital} against ${ctx.capital} collateral at low LTV; est. gas ${ctx.gas}, ~15 min.`,
-      `Create borrow-side footprint on ${ctx.name} (${ctx.mainChain}) by minting or borrowing ${ctx.quarterCapital} from your ${ctx.capital} line while keeping LTV under 35%; gas ${ctx.gas}, ~15 min.`,
+      `Borrow ${ctx.quarterCapital} safely against your ${ctx.capital} ${ctx.name} collateral on ${ctx.mainChain} (keep health factor >2.0) to record borrower activity; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`,
+      `Draw a conservative ${ctx.quarterCapital} loan backed by your ${ctx.capital} ${ctx.name} deposit on ${ctx.mainChain} and repay half after 48h for dual-side history; ${ctx.feeLabel} ${ctx.gas}, ~20 min.`,
+      `Activate a second market on ${ctx.name} (${ctx.mainChain}) by borrowing ${ctx.quarterCapital} against ${ctx.capital} collateral at low LTV; est. ${ctx.feeLabel} ${ctx.gas}, ~15 min.`,
+      `Create borrow-side footprint on ${ctx.name} (${ctx.mainChain}) by borrowing ${ctx.quarterCapital} from your ${ctx.capital} line while keeping LTV under 35%; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`,
     ],
     ctx.slug,
     'lend-s3',
   );
   const s4 = pick(
     [
-      `Weekly on ${ctx.mainChain}: check health factor on your ${ctx.capital} ${ctx.name} position, harvest rewards, and repay or top up borrow dust; gas ${ctx.gas}, ~10 min weekly.`,
-      `Run a weekly ${ctx.mainChain} check on ${ctx.name}: rebalance your ${ctx.capital} collateral ratio, claim incentives, and log one small repay tx; cost ${ctx.gas}, ~10 min weekly.`,
-      `Each week on ${ctx.mainChain}, verify ${ctx.name} borrow APRs on your ${ctx.capital} deposit and execute a small interest repayment to stay active; gas ${ctx.gas}, ~15 min weekly.`,
+      `Weekly on ${ctx.mainChain}: check health factor on your ${ctx.capital} ${ctx.name} position, harvest rewards, and repay or top up borrow dust; ${ctx.feeLabel} ${ctx.gas}, ~${ctx.weeklyMinutes} min weekly.`,
+      `Run a weekly ${ctx.mainChain} check on ${ctx.name}: rebalance your ${ctx.capital} collateral ratio, claim incentives, and log one small repay tx; cost ${ctx.gas}, ~${ctx.weeklyMinutes} min weekly.`,
+      `Each week on ${ctx.mainChain}, verify ${ctx.name} borrow APRs on your ${ctx.capital} deposit and execute a small interest repayment to stay active; ${ctx.feeLabel} ${ctx.gas}, ~${ctx.weeklyMinutes} min weekly.`,
     ],
     ctx.slug,
     'lend-s4',
@@ -834,32 +1073,61 @@ function farmLending(ctx: FarmContext): string[] {
   return [step1WalletAndBridge(ctx), s2, s3, s4, step5TrackLaunch(ctx)];
 }
 
+function farmCdp(ctx: FarmContext): string[] {
+  const cdpLabel = /\bCDP\b/i.test(ctx.name) ? '' : ' CDP';
+  const s2 = pick(
+    [
+      `Lock ${ctx.capital} of ${ctx.coreAsset} into a ${ctx.name}${cdpLabel} vault on ${ctx.mainChain} and mint ${ctx.halfCapital} of its protocol stablecoin at >200% collateralization; ${ctx.feeLabel} ${ctx.gas}, ~20 min.`,
+      `Open a ${ctx.name} collateralized debt vault on ${ctx.mainChain} with ${ctx.capital} in ${ctx.coreAsset} and mint ${ctx.quarterCapital} in protocol debt at safe LTV; cost ${ctx.gas}, ~20 min.`,
+    ],
+    ctx.slug,
+    'cdp-s2',
+  );
+  const s3 = pick(
+    [
+      `Deposit your minted ${ctx.name} stablecoin (${ctx.quarterCapital} from your ${ctx.capital} vault) into the stability pool or flagship stable LP on ${ctx.mainChain}; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`,
+      `Put minted ${ctx.name} stablecoins to work on ${ctx.mainChain} by staking ${ctx.quarterCapital} into the protocol savings module or peg-stability pool alongside your ${ctx.capital} vault; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`,
+    ],
+    ctx.slug,
+    'cdp-s3',
+  );
+  const s4 = pick(
+    [
+      `Weekly on ${ctx.mainChain}: verify collateral ratio and stablecoin peg on your ${ctx.capital} ${ctx.name}${cdpLabel} vault, claim stability yields, and adjust debt if needed; ${ctx.feeLabel} ${ctx.gas}, ~${ctx.weeklyMinutes} min weekly.`,
+      `Each week on ${ctx.mainChain}, audit liquidation buffer on your ${ctx.capital} ${ctx.name}${cdpLabel} position and compound stability-pool rewards; cost ${ctx.gas}, ~${ctx.weeklyMinutes} min weekly.`,
+    ],
+    ctx.slug,
+    'cdp-s4',
+  );
+  return [step1WalletAndBridge(ctx), s2, s3, s4, step5TrackLaunch(ctx)];
+}
+
 function farmDexs(ctx: FarmContext): string[] {
   const s2 = pick(
     [
-      `Provide ${ctx.capital} in liquidity to ${ctx.name}'s highest-volume stable or major pair on ${ctx.mainChain} to accumulate LP fee history; gas ${ctx.gas}, ~20 min.`,
-      `Deploy ${ctx.capital} across a major ${ctx.name} pool on ${ctx.mainChain} using a balanced range to avoid frequent out-of-range resets; est. gas ${ctx.gas}, ~20 min.`,
+      `Provide ${ctx.capital} in liquidity to ${ctx.name}'s highest-volume stable or major pair on ${ctx.mainChain} to accumulate LP fee history; ${ctx.feeLabel} ${ctx.gas}, ~20 min.`,
+      `Deploy ${ctx.capital} across a major ${ctx.name} pool on ${ctx.mainChain} using a balanced range to avoid frequent out-of-range resets; est. ${ctx.feeLabel} ${ctx.gas}, ~20 min.`,
       `Seed a ${ctx.capital} LP position on ${ctx.name} (${ctx.mainChain}) in a top-TVL pair to earn organic swap fees and protocol weight; cost ${ctx.gas}, ~15 min.`,
-      `Add ${ctx.capital} of paired assets into ${ctx.name}'s flagship ${ctx.mainChain} pool and stake the LP receipt if a gauge exists; est. gas ${ctx.gas}, ~20 min.`,
+      `Add ${ctx.capital} of paired assets into ${ctx.name}'s flagship ${ctx.mainChain} pool and stake the LP receipt if a gauge exists; est. ${ctx.feeLabel} ${ctx.gas}, ~20 min.`,
     ],
     ctx.slug,
     'dex-s2',
   );
   const s3 = pick(
     [
-      `Execute 3-4 organic spot swaps totaling ${ctx.halfCapital} across distinct pairs on ${ctx.name} (${ctx.mainChain}) alongside your ${ctx.capital} LP; gas ${ctx.gas}, ~15 min.`,
-      `Place a limit order or route ${ctx.quarterCapital} of multi-hop swaps on ${ctx.name} (${ctx.mainChain}) to pair trader volume with your ${ctx.capital} LP; gas ${ctx.gas}, ~15 min.`,
-      `Route ${ctx.halfCapital} in spot swaps across two ${ctx.name} fee tiers on ${ctx.mainChain} so your ${ctx.capital} wallet records both LP and taker flow; gas ${ctx.gas}, ~15 min.`,
-      `Use ${ctx.name}'s router on ${ctx.mainChain} for ${ctx.quarterCapital} in cross-pair swaps to diversify beyond your ${ctx.capital} liquidity deposit; gas ${ctx.gas}, ~10 min.`,
+      `Execute 3-4 organic spot swaps totaling ${ctx.halfCapital} across distinct pairs on ${ctx.name} (${ctx.mainChain}) alongside your ${ctx.capital} LP; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`,
+      `Place a limit order or route ${ctx.quarterCapital} of multi-hop swaps on ${ctx.name} (${ctx.mainChain}) to pair trader volume with your ${ctx.capital} LP; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`,
+      `Route ${ctx.halfCapital} in spot swaps across two ${ctx.name} fee tiers on ${ctx.mainChain} so your ${ctx.capital} wallet records both LP and taker flow; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`,
+      `Use ${ctx.name}'s router on ${ctx.mainChain} for ${ctx.quarterCapital} in cross-pair swaps to diversify beyond your ${ctx.capital} liquidity deposit; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`,
     ],
     ctx.slug,
     'dex-s3',
   );
   const s4 = pick(
     [
-      `Weekly on ${ctx.mainChain}: collect accrued fees on your ${ctx.capital} ${ctx.name} LP, recenter if out of range, and execute one fresh swap; gas ${ctx.gas}, ~10 min weekly.`,
-      `Each week on ${ctx.mainChain}, audit range utilization on your ${ctx.capital} ${ctx.name} pool and compound earned fees with a small swap; cost ${ctx.gas}, ~15 min weekly.`,
-      `Maintain weekly ${ctx.mainChain} cadence on ${ctx.name}: claim LP fees from your ${ctx.capital} stake and route a ${ctx.quarterCapital} swap; gas ${ctx.gas}, ~10 min weekly.`,
+      `Weekly on ${ctx.mainChain}: collect accrued fees on your ${ctx.capital} ${ctx.name} LP, recenter if out of range, and execute one fresh swap; ${ctx.feeLabel} ${ctx.gas}, ~${ctx.weeklyMinutes} min weekly.`,
+      `Each week on ${ctx.mainChain}, audit range utilization on your ${ctx.capital} ${ctx.name} pool and compound earned fees with a small swap; cost ${ctx.gas}, ~${ctx.weeklyMinutes} min weekly.`,
+      `Maintain weekly ${ctx.mainChain} cadence on ${ctx.name}: claim LP fees from your ${ctx.capital} stake and route a ${ctx.quarterCapital} swap; ${ctx.feeLabel} ${ctx.gas}, ~${ctx.weeklyMinutes} min weekly.`,
     ],
     ctx.slug,
     'dex-s4',
@@ -870,29 +1138,29 @@ function farmDexs(ctx: FarmContext): string[] {
 function farmYieldGroup(ctx: FarmContext): string[] {
   const s2 = pick(
     [
-      `Deposit ${ctx.capital} into ${ctx.name}'s flagship ${ctx.mainChain} curated vault or yield strategy to start continuous share-time accrual; gas ${ctx.gas}, ~15 min.`,
-      `Allocate ${ctx.capital} into the highest-liquidity ${ctx.name} vault on ${ctx.mainChain}, verifying share token minting on-chain; est. gas ${ctx.gas}, ~15 min.`,
-      `Mint ${ctx.name} vault shares with ${ctx.capital} on ${ctx.mainChain}, prioritizing audited stablecoin or ETH yield strategies; cost ${ctx.gas}, ~20 min.`,
-      `Enter ${ctx.name}'s core ${ctx.mainChain} yield pool with ${ctx.capital} to build durable TVL-weighted history across epochs; est. gas ${ctx.gas}, ~15 min.`,
+      `Deposit ${ctx.capital} into ${ctx.name}'s flagship ${ctx.mainChain} curated vault or yield strategy to start continuous share-time accrual; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`,
+      `Allocate ${ctx.capital} into the highest-liquidity ${ctx.name} vault on ${ctx.mainChain}, verifying share token minting on-chain; est. ${ctx.feeLabel} ${ctx.gas}, ~15 min.`,
+      `Mint ${ctx.name} vault shares with ${ctx.capital} on ${ctx.mainChain}, prioritizing audited ${ctx.coreAsset} yield strategies; cost ${ctx.gas}, ~20 min.`,
+      `Enter ${ctx.name}'s core ${ctx.mainChain} yield pool with ${ctx.capital} to build durable TVL-weighted history across epochs; est. ${ctx.feeLabel} ${ctx.gas}, ~15 min.`,
     ],
     ctx.slug,
     'yld-s2',
   );
   const s3 = pick(
     [
-      `Split ${ctx.quarterCapital} from your ${ctx.capital} budget into a second ${ctx.name} strategy or boosted lock vault on ${ctx.mainChain} for multi-vault coverage; gas ${ctx.gas}, ~15 min.`,
-      `Pair your ${ctx.capital} ${ctx.name} vault deposit on ${ctx.mainChain} with a ${ctx.quarterCapital} entry into a secondary risk tier or PT/YT pool; gas ${ctx.gas}, ~20 min.`,
-      `Use your ${ctx.name} receipt token on ${ctx.mainChain} (or allocate ${ctx.quarterCapital} of your ${ctx.capital} cap) in an integrated DeFi pool for composable activity; gas ${ctx.gas}, ~15 min.`,
-      `Diversify across two ${ctx.name} curated vaults on ${ctx.mainChain} by moving ${ctx.quarterCapital} of your ${ctx.capital} allocation into an alternate strategy; gas ${ctx.gas}, ~15 min.`,
+      `Split ${ctx.quarterCapital} from your ${ctx.capital} budget into a second ${ctx.name} strategy or boosted lock vault on ${ctx.mainChain} for multi-vault coverage; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`,
+      `Pair your ${ctx.capital} ${ctx.name} vault deposit on ${ctx.mainChain} with a ${ctx.quarterCapital} entry into a secondary risk tier or PT/YT pool; ${ctx.feeLabel} ${ctx.gas}, ~20 min.`,
+      `Use your ${ctx.name} receipt token on ${ctx.mainChain} (or allocate ${ctx.quarterCapital} of your ${ctx.capital} cap) in an integrated DeFi pool for composable activity; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`,
+      `Diversify across two ${ctx.name} curated vaults on ${ctx.mainChain} by moving ${ctx.quarterCapital} of your ${ctx.capital} allocation into an alternate strategy; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`,
     ],
     ctx.slug,
     'yld-s3',
   );
   const s4 = pick(
     [
-      `Weekly on ${ctx.mainChain}: review ${ctx.name} vault APY and curator risk updates on your ${ctx.capital} stake, then claim or compound rewards; gas ${ctx.gas}, ~10 min weekly.`,
-      `Every week on ${ctx.mainChain}, verify ${ctx.name} share exchange rates on your ${ctx.capital} allocation and roll maturing epochs if applicable; cost ${ctx.gas}, ~10 min weekly.`,
-      `Hold a weekly ${ctx.mainChain} routine on ${ctx.name}: check curator exposure on your ${ctx.capital} vaults and harvest accrued incentives; gas ${ctx.gas}, ~15 min weekly.`,
+      `Weekly on ${ctx.mainChain}: review ${ctx.name} vault APY and curator risk updates on your ${ctx.capital} stake, then claim or compound rewards; ${ctx.feeLabel} ${ctx.gas}, ~${ctx.weeklyMinutes} min weekly.`,
+      `Every week on ${ctx.mainChain}, verify ${ctx.name} share exchange rates on your ${ctx.capital} allocation and roll maturing epochs if applicable; cost ${ctx.gas}, ~${ctx.weeklyMinutes} min weekly.`,
+      `Hold a weekly ${ctx.mainChain} routine on ${ctx.name}: check curator exposure on your ${ctx.capital} vaults and harvest accrued incentives; ${ctx.feeLabel} ${ctx.gas}, ~${ctx.weeklyMinutes} min weekly.`,
     ],
     ctx.slug,
     'yld-s4',
@@ -903,29 +1171,29 @@ function farmYieldGroup(ctx: FarmContext): string[] {
 function farmRwa(ctx: FarmContext): string[] {
   const s2 = pick(
     [
-      `Complete any required wallet allowlisting and mint or acquire ${ctx.capital} of ${ctx.name}'s core RWA token on ${ctx.mainChain}; gas ${ctx.gas}, ~25 min.`,
+      `Complete any required wallet allowlisting and mint or acquire ${ctx.capital} of ${ctx.name}'s core RWA token on ${ctx.mainChain}; ${ctx.feeLabel} ${ctx.gas}, ~25 min.`,
       `Deploy ${ctx.capital} into ${ctx.name}'s primary tokenized treasury or credit vault on ${ctx.mainChain} to establish real-yield duration; cost ${ctx.gas}, ~20 min.`,
-      `Subscribe ${ctx.capital} in USDC into ${ctx.name}'s liquid ${ctx.mainChain} RWA product and verify balance accrual on-chain; est. gas ${ctx.gas}, ~20 min.`,
-      `Convert ${ctx.capital} into ${ctx.name}'s flagship ${ctx.mainChain} RWA instrument to build long-duration holder history; est. gas ${ctx.gas}, ~20 min.`,
+      `Subscribe ${ctx.capital} in ${ctx.coreAsset} into ${ctx.name}'s liquid ${ctx.mainChain} RWA product and verify balance accrual on-chain; est. ${ctx.feeLabel} ${ctx.gas}, ~20 min.`,
+      `Convert ${ctx.capital} into ${ctx.name}'s flagship ${ctx.mainChain} RWA instrument to build long-duration holder history; est. ${ctx.feeLabel} ${ctx.gas}, ~20 min.`,
     ],
     ctx.slug,
     'rwa-s2',
   );
   const s3 = pick(
     [
-      `Wrap or supply ${ctx.halfCapital} of your ${ctx.capital} ${ctx.name} RWA tokens on ${ctx.mainChain} into a secondary liquidity or collateral pool; gas ${ctx.gas}, ~15 min.`,
-      `Test a ${ctx.quarterCapital} swap or redemption cycle on ${ctx.name} (${ctx.mainChain}) alongside your ${ctx.capital} core holding to log two contract paths; gas ${ctx.gas}, ~15 min.`,
-      `Stake ${ctx.halfCapital} of your ${ctx.capital} ${ctx.name} RWA position in a partnered ${ctx.mainChain} yield or LP vault for extra on-chain depth; gas ${ctx.gas}, ~20 min.`,
-      `Use ${ctx.quarterCapital} of your ${ctx.capital} ${ctx.name} balance on ${ctx.mainChain} to interact with a secondary RWA pool or wrapper contract; gas ${ctx.gas}, ~15 min.`,
+      `Wrap or supply ${ctx.halfCapital} of your ${ctx.capital} ${ctx.name} RWA tokens on ${ctx.mainChain} into a secondary liquidity or collateral pool; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`,
+      `Test a ${ctx.quarterCapital} swap or redemption cycle on ${ctx.name} (${ctx.mainChain}) alongside your ${ctx.capital} core holding to log two contract paths; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`,
+      `Stake ${ctx.halfCapital} of your ${ctx.capital} ${ctx.name} RWA position in a partnered ${ctx.mainChain} yield or LP vault for extra on-chain depth; ${ctx.feeLabel} ${ctx.gas}, ~20 min.`,
+      `Use ${ctx.quarterCapital} of your ${ctx.capital} ${ctx.name} balance on ${ctx.mainChain} to interact with a secondary RWA pool or wrapper contract; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`,
     ],
     ctx.slug,
     'rwa-s3',
   );
   const s4 = pick(
     [
-      `Weekly on ${ctx.mainChain}: verify NAV yield accrual on your ${ctx.capital} ${ctx.name} position and claim any bonus reward distributions; gas ${ctx.gas}, ~10 min weekly.`,
-      `Each week on ${ctx.mainChain}, check ${ctx.name} redemption queue liquidity for your ${ctx.capital} holding and compound yield distributions; cost ${ctx.gas}, ~10 min weekly.`,
-      `Maintain a weekly ${ctx.mainChain} review of ${ctx.name}: confirm attestation updates on your ${ctx.capital} RWA balance and log one maintenance tx; gas ${ctx.gas}, ~10 min weekly.`,
+      `Weekly on ${ctx.mainChain}: verify NAV yield accrual on your ${ctx.capital} ${ctx.name} position and claim any bonus reward distributions; ${ctx.feeLabel} ${ctx.gas}, ~${ctx.weeklyMinutes} min weekly.`,
+      `Each week on ${ctx.mainChain}, check ${ctx.name} redemption queue liquidity for your ${ctx.capital} holding and compound yield distributions; cost ${ctx.gas}, ~${ctx.weeklyMinutes} min weekly.`,
+      `Maintain a weekly ${ctx.mainChain} review of ${ctx.name}: confirm attestation updates on your ${ctx.capital} RWA balance and log one maintenance tx; ${ctx.feeLabel} ${ctx.gas}, ~${ctx.weeklyMinutes} min weekly.`,
     ],
     ctx.slug,
     'rwa-s4',
@@ -936,29 +1204,29 @@ function farmRwa(ctx: FarmContext): string[] {
 function farmChain(ctx: FarmContext): string[] {
   const s2 = pick(
     [
-      `Bridge ${ctx.capital} into the ${ctx.name} ecosystem on ${ctx.mainChain} and deposit ${ctx.halfCapital} into its leading native DEX or lending pool; gas ${ctx.gas}, ~20 min.`,
-      `Deploy ${ctx.capital} across ${ctx.name}'s native ${ctx.mainChain} DeFi stack by providing liquidity or staking in a core ecosystem protocol; cost ${ctx.gas}, ~20 min.`,
-      `Activate your ${ctx.mainChain} address on ${ctx.name} by committing ${ctx.capital} to a top native liquidity or staking contract for TVL time; gas ${ctx.gas}, ~20 min.`,
-      `Move ${ctx.capital} onto ${ctx.name} (${ctx.mainChain}) and lock ${ctx.halfCapital} in a flagship ecosystem vault to establish sustained chain TVL; gas ${ctx.gas}, ~20 min.`,
+      `Deploy ${ctx.capital} into the ${ctx.name} ecosystem on ${ctx.mainChain} and deposit ${ctx.halfCapital} into its leading native DEX or lending pool; ${ctx.feeLabel} ${ctx.gas}, ~20 min.`,
+      `Allocate ${ctx.capital} across ${ctx.name}'s native ${ctx.mainChain} DeFi stack by providing liquidity or staking in a core ecosystem protocol; cost ${ctx.gas}, ~20 min.`,
+      `Activate your ${ctx.mainChain} address on ${ctx.name} by committing ${ctx.capital} to a top native liquidity or staking contract for TVL time; ${ctx.feeLabel} ${ctx.gas}, ~20 min.`,
+      `Move ${ctx.capital} onto ${ctx.name} (${ctx.mainChain}) and lock ${ctx.halfCapital} in a flagship ecosystem vault to establish sustained chain TVL; ${ctx.feeLabel} ${ctx.gas}, ~20 min.`,
     ],
     ctx.slug,
     'chn-s2',
   );
   const s3 = pick(
     [
-      `Interact with 3 distinct ${ctx.name} contracts on ${ctx.mainChain} using ${ctx.quarterCapital} from your ${ctx.capital} budget (swap, domain/NFT mint, lend); gas ${ctx.gas}, ~20 min.`,
-      `Build diverse ${ctx.name} contract breadth on ${ctx.mainChain} by routing ${ctx.quarterCapital} of your ${ctx.capital} funds across a bridge, DEX, and money market; gas ${ctx.gas}, ~20 min.`,
-      `Register an on-chain identity or deploy a simple contract on ${ctx.name} (${ctx.mainChain}) alongside ${ctx.quarterCapital} of your ${ctx.capital} swaps; gas ${ctx.gas}, ~15 min.`,
-      `Spread ${ctx.quarterCapital} of your ${ctx.capital} ${ctx.name} stack across two additional ${ctx.mainChain} dApps to increase unique contract count; gas ${ctx.gas}, ~20 min.`,
+      `Interact with 3 distinct ${ctx.name} contracts on ${ctx.mainChain} using ${ctx.quarterCapital} from your ${ctx.capital} budget (swap, identity/NFT, lend); ${ctx.feeLabel} ${ctx.gas}, ~20 min.`,
+      `Build diverse ${ctx.name} contract breadth on ${ctx.mainChain} by routing ${ctx.quarterCapital} of your ${ctx.capital} funds across a DEX, staking pool, and money market; ${ctx.feeLabel} ${ctx.gas}, ~20 min.`,
+      `Register an on-chain identity or stake with a validator on ${ctx.name} (${ctx.mainChain}) alongside ${ctx.quarterCapital} of your ${ctx.capital} swaps; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`,
+      `Spread ${ctx.quarterCapital} of your ${ctx.capital} ${ctx.name} stack across two additional ${ctx.mainChain} dApps to increase unique contract count; ${ctx.feeLabel} ${ctx.gas}, ~20 min.`,
     ],
     ctx.slug,
     'chn-s3',
   );
   const s4 = pick(
     [
-      `Weekly on ${ctx.mainChain}: execute 2-3 organic transactions across ${ctx.name} dApps while maintaining your ${ctx.capital} TVL footprint; gas ${ctx.gas}, ~15 min weekly.`,
-      `Every week on ${ctx.mainChain}, rotate a small ${ctx.quarterCapital} swap and claim rewards on your ${ctx.capital} ${ctx.name} positions to sustain active-week streaks; gas ${ctx.gas}, ~15 min weekly.`,
-      `Keep a weekly ${ctx.mainChain} cadence on ${ctx.name}: touch two native apps and rebalance your ${ctx.capital} liquidity; cost ${ctx.gas}, ~10 min weekly.`,
+      `Weekly on ${ctx.mainChain}: execute 2-3 organic transactions across ${ctx.name} dApps while maintaining your ${ctx.capital} TVL footprint; ${ctx.feeLabel} ${ctx.gas}, ~${ctx.weeklyMinutes} min weekly.`,
+      `Every week on ${ctx.mainChain}, rotate a small ${ctx.quarterCapital} swap and claim rewards on your ${ctx.capital} ${ctx.name} positions to sustain active-week streaks; ${ctx.feeLabel} ${ctx.gas}, ~${ctx.weeklyMinutes} min weekly.`,
+      `Keep a weekly ${ctx.mainChain} cadence on ${ctx.name}: touch two native apps and rebalance your ${ctx.capital} liquidity; cost ${ctx.gas}, ~${ctx.weeklyMinutes} min weekly.`,
     ],
     ctx.slug,
     'chn-s4',
@@ -967,31 +1235,32 @@ function farmChain(ctx: FarmContext): string[] {
 }
 
 function farmPerpDerivatives(ctx: FarmContext): string[] {
+  const chainQual = ctx.name.toLowerCase().includes(ctx.mainChain.toLowerCase()) ? '' : ` ${ctx.mainChain}`;
   const s2 = pick(
     [
-      `Deposit ${ctx.capital} margin into ${ctx.name} on ${ctx.mainChain} and execute low-leverage (1x-3x) delta-managed perp trades to build volume; gas ${ctx.gas}, ~20 min.`,
-      `Fund your ${ctx.name} ${ctx.mainChain} margin account with ${ctx.capital} and place maker limit orders on BTC/ETH perps to accrue trading points; cost ${ctx.gas}, ~20 min.`,
-      `Post ${ctx.capital} USDC collateral on ${ctx.name} (${ctx.mainChain}) and open hedged or tight-stop perp trades for consistent taker/maker volume; gas ${ctx.gas}, ~25 min.`,
-      `Transfer ${ctx.capital} into ${ctx.name}'s ${ctx.mainChain} trading engine and run conservative 2x perp positions across major markets; est. gas ${ctx.gas}, ~20 min.`,
+      `Deposit ${ctx.capital} margin into ${ctx.name} on ${ctx.mainChain} and execute low-leverage (1x-3x) delta-managed perp trades to build volume; ${ctx.feeLabel} ${ctx.gas}, ~20 min.`,
+      `Fund your ${ctx.name}${chainQual} margin account with ${ctx.capital} and place maker limit orders on flagship perp markets to accrue trading points; cost ${ctx.gas}, ~20 min.`,
+      `Post ${ctx.capital} collateral on ${ctx.name} (${ctx.mainChain}) and open hedged or tight-stop perp trades for consistent taker/maker volume; ${ctx.feeLabel} ${ctx.gas}, ~25 min.`,
+      `Transfer ${ctx.capital} into ${ctx.name}'s${chainQual} trading engine and run conservative 2x perp positions across major markets; est. ${ctx.feeLabel} ${ctx.gas}, ~20 min.`,
     ],
     ctx.slug,
     'perp-s2',
   );
   const s3 = pick(
     [
-      `Allocate ${ctx.halfCapital} of your ${ctx.capital} capital into ${ctx.name}'s LP/HLP liquidity vault on ${ctx.mainChain} to pair passive LP with trading volume; gas ${ctx.gas}, ~15 min.`,
-      `Stake ${ctx.quarterCapital} from your ${ctx.capital} margin into ${ctx.name}'s insurance or market-making vault on ${ctx.mainChain} for a second footprint; gas ${ctx.gas}, ~15 min.`,
-      `Trade an altcoin or options/funding market on ${ctx.name} (${ctx.mainChain}) with ${ctx.quarterCapital} of your ${ctx.capital} margin to widen product usage; gas ${ctx.gas}, ~15 min.`,
-      `Combine your ${ctx.capital} ${ctx.name} perp trading on ${ctx.mainChain} with a ${ctx.halfCapital} liquidity vault deposit so both maker and LP tiers score; gas ${ctx.gas}, ~15 min.`,
+      `Allocate ${ctx.halfCapital} of your ${ctx.capital} capital into ${ctx.name}'s LP/HLP liquidity vault on ${ctx.mainChain} to pair passive LP with trading volume; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`,
+      `Stake ${ctx.quarterCapital} from your ${ctx.capital} margin into ${ctx.name}'s insurance or market-making vault on ${ctx.mainChain} for a second footprint; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`,
+      `Trade an altcoin or options/funding market on ${ctx.name} (${ctx.mainChain}) with ${ctx.quarterCapital} of your ${ctx.capital} margin to widen product usage; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`,
+      `Combine your ${ctx.capital} ${ctx.name} perp trading on ${ctx.mainChain} with a ${ctx.halfCapital} liquidity vault deposit so both maker and LP tiers score; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`,
     ],
     ctx.slug,
     'perp-s3',
   );
   const s4 = pick(
     [
-      `Weekly on ${ctx.mainChain}: generate fresh maker/taker volume with your ${ctx.capital} ${ctx.name} margin, review funding rates, and settle PnL; gas ${ctx.gas}, ~15 min weekly.`,
-      `Each week on ${ctx.mainChain}, run 2-3 disciplined perp cycles on ${ctx.name} using your ${ctx.capital} account and harvest vault yields; cost ${ctx.gas}, ~15 min weekly.`,
-      `Maintain weekly ${ctx.mainChain} cadence on ${ctx.name}: rotate ${ctx.halfCapital} in limit-order volume from your ${ctx.capital} margin and check fee rebates; gas ${ctx.gas}, ~15 min weekly.`,
+      `Weekly on ${ctx.mainChain}: generate fresh maker/taker volume with your ${ctx.capital} ${ctx.name} margin, review funding rates, and settle PnL; ${ctx.feeLabel} ${ctx.gas}, ~${ctx.weeklyMinutes} min weekly.`,
+      `Each week on ${ctx.mainChain}, run 2-3 disciplined perp cycles on ${ctx.name} using your ${ctx.capital} account and harvest vault yields; cost ${ctx.gas}, ~${ctx.weeklyMinutes} min weekly.`,
+      `Maintain weekly ${ctx.mainChain} cadence on ${ctx.name}: rotate ${ctx.halfCapital} in limit-order volume from your ${ctx.capital} margin and check fee rebates; ${ctx.feeLabel} ${ctx.gas}, ~${ctx.weeklyMinutes} min weekly.`,
     ],
     ctx.slug,
     'perp-s4',
@@ -1000,31 +1269,37 @@ function farmPerpDerivatives(ctx: FarmContext): string[] {
 }
 
 function farmPayments(ctx: FarmContext): string[] {
+  if (ctx.chainKind === 'bitcoin') {
+    const s2 = `Open a funded ${ctx.name} channel on Bitcoin with ${ctx.capital} in BTC (via Phoenix/Zeus or self-hosted node) and settle your first BOLT11 invoice; ${ctx.feeLabel} ${ctx.gas}, ~20 min.`;
+    const s3 = `Establish inbound liquidity and route ${ctx.quarterCapital} of your ${ctx.capital} BTC across 2-3 ${ctx.name} channels or submarine swaps; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`;
+    const s4 = `Weekly on Bitcoin: rebalance ${ctx.name} channel capacity on your ${ctx.capital} BTC liquidity, settle routine invoices, and log routing fees; ${ctx.feeLabel} ${ctx.gas}, ~${ctx.weeklyMinutes} min weekly.`;
+    return [step1WalletAndBridge(ctx), s2, s3, s4, step5TrackLaunch(ctx)];
+  }
   const s2 = pick(
     [
-      `Load ${ctx.capital} in USDC into ${ctx.name}'s payment or card account on ${ctx.mainChain} and complete your first settlement or spend transaction; gas ${ctx.gas}, ~20 min.`,
-      `Deposit ${ctx.capital} onto ${ctx.name} (${ctx.mainChain}) to activate merchant payments, card spending, or yield-bearing spend balances; est. gas ${ctx.gas}, ~20 min.`,
+      `Load ${ctx.capital} in ${ctx.coreAsset} into ${ctx.name}'s payment or card account on ${ctx.mainChain} and complete your first settlement or spend transaction; ${ctx.feeLabel} ${ctx.gas}, ~20 min.`,
+      `Deposit ${ctx.capital} onto ${ctx.name} (${ctx.mainChain}) to activate merchant payments, card spending, or yield-bearing spend balances; est. ${ctx.feeLabel} ${ctx.gas}, ~20 min.`,
       `Fund ${ctx.name} on ${ctx.mainChain} with ${ctx.capital} and route an initial payment transfer or invoice settlement to record real usage; cost ${ctx.gas}, ~15 min.`,
-      `Initialize a ${ctx.capital} balance in ${ctx.name} on ${ctx.mainChain} and execute an on-chain checkout or peer transfer to start activity tracking; gas ${ctx.gas}, ~20 min.`,
+      `Initialize a ${ctx.capital} balance in ${ctx.name} on ${ctx.mainChain} and execute an on-chain checkout or peer transfer to start activity tracking; ${ctx.feeLabel} ${ctx.gas}, ~20 min.`,
     ],
     ctx.slug,
     'pay-s2',
   );
   const s3 = pick(
     [
-      `Enable ${ctx.name}'s secondary rail on ${ctx.mainChain}—auto-yield savings, recurring payroll, or cross-asset convert—with ${ctx.quarterCapital} of your ${ctx.capital}; gas ${ctx.gas}, ~15 min.`,
-      `Create a second ${ctx.name} footprint on ${ctx.mainChain} by sending ${ctx.quarterCapital} of your ${ctx.capital} via a payment link or merchant QR flow; gas ${ctx.gas}, ~15 min.`,
-      `Stake or park ${ctx.halfCapital} of your ${ctx.capital} ${ctx.name} funds on ${ctx.mainChain} in its settlement liquidity or cashback tier; est. gas ${ctx.gas}, ~15 min.`,
-      `Test ${ctx.name}'s off-ramp or stablecoin conversion feature on ${ctx.mainChain} with ${ctx.quarterCapital} from your ${ctx.capital} balance; gas ${ctx.gas}, ~15 min.`,
+      `Enable ${ctx.name}'s secondary rail on ${ctx.mainChain}—auto-yield savings, recurring payroll, or cross-asset convert—with ${ctx.quarterCapital} of your ${ctx.capital}; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`,
+      `Create a second ${ctx.name} footprint on ${ctx.mainChain} by sending ${ctx.quarterCapital} of your ${ctx.capital} via a payment link or merchant QR flow; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`,
+      `Stake or park ${ctx.halfCapital} of your ${ctx.capital} ${ctx.name} funds on ${ctx.mainChain} in its settlement liquidity or cashback tier; est. ${ctx.feeLabel} ${ctx.gas}, ~15 min.`,
+      `Test ${ctx.name}'s off-ramp or stablecoin conversion feature on ${ctx.mainChain} with ${ctx.quarterCapital} from your ${ctx.capital} balance; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`,
     ],
     ctx.slug,
     'pay-s3',
   );
   const s4 = pick(
     [
-      `Weekly on ${ctx.mainChain}: route regular spending or transfers through your ${ctx.capital} ${ctx.name} account and top up settled balances; gas ${ctx.gas}, ~10 min weekly.`,
-      `Each week on ${ctx.mainChain}, settle 2-3 routine transfers on ${ctx.name} from your ${ctx.capital} balance and redeem cashback points; cost ${ctx.gas}, ~10 min weekly.`,
-      `Keep weekly ${ctx.mainChain} payment velocity on ${ctx.name}: cycle ${ctx.quarterCapital} from your ${ctx.capital} account and reconcile receipts; gas ${ctx.gas}, ~10 min weekly.`,
+      `Weekly on ${ctx.mainChain}: route regular spending or transfers through your ${ctx.capital} ${ctx.name} account and top up settled balances; ${ctx.feeLabel} ${ctx.gas}, ~${ctx.weeklyMinutes} min weekly.`,
+      `Each week on ${ctx.mainChain}, settle 2-3 routine transfers on ${ctx.name} from your ${ctx.capital} balance and redeem cashback points; cost ${ctx.gas}, ~${ctx.weeklyMinutes} min weekly.`,
+      `Keep weekly ${ctx.mainChain} payment velocity on ${ctx.name}: cycle ${ctx.quarterCapital} from your ${ctx.capital} account and reconcile receipts; ${ctx.feeLabel} ${ctx.gas}, ~${ctx.weeklyMinutes} min weekly.`,
     ],
     ctx.slug,
     'pay-s4',
@@ -1042,27 +1317,27 @@ function formatCategoryLabel(category: string): string {
 function farmPredictionMarket(ctx: FarmContext): string[] {
   const s2 = pick(
     [
-      `Deposit ${ctx.capital} in USDC into ${ctx.name} on ${ctx.mainChain} and trade YES/NO outcome shares across 3-5 high-liquidity markets; gas ${ctx.gas}, ~20 min.`,
+      `Deposit ${ctx.capital} in USDC into ${ctx.name} on ${ctx.mainChain} and trade YES/NO outcome shares across 3-5 high-liquidity markets; ${ctx.feeLabel} ${ctx.gas}, ~20 min.`,
       `Fund your ${ctx.name} ${ctx.mainChain} account with ${ctx.capital} and place limit bids/asks on major event markets to build maker volume; cost ${ctx.gas}, ~20 min.`,
-      `Allocate ${ctx.capital} across liquid ${ctx.name} prediction markets on ${ctx.mainChain}, pairing near-term and longer-dated event contracts; est. gas ${ctx.gas}, ~20 min.`,
+      `Allocate ${ctx.capital} across liquid ${ctx.name} prediction markets on ${ctx.mainChain}, pairing near-term and longer-dated event contracts; est. ${ctx.feeLabel} ${ctx.gas}, ~20 min.`,
     ],
     ctx.slug,
     'pm-s2',
   );
   const s3 = pick(
     [
-      `Provide two-sided limit-order liquidity with ${ctx.quarterCapital} of your ${ctx.capital} ${ctx.name} balance on ${ctx.mainChain} to capture liquidity-reward weight; gas ${ctx.gas}, ~15 min.`,
-      `Spread ${ctx.quarterCapital} from your ${ctx.capital} ${ctx.name} stake across a second category (macro, crypto, or sports) on ${ctx.mainChain} for breadth; gas ${ctx.gas}, ~15 min.`,
-      `Split or merge ${ctx.quarterCapital} of outcome shares on ${ctx.name} (${ctx.mainChain}) alongside your ${ctx.capital} trades to record contract diversity; gas ${ctx.gas}, ~15 min.`,
+      `Provide two-sided limit-order liquidity with ${ctx.quarterCapital} of your ${ctx.capital} ${ctx.name} balance on ${ctx.mainChain} to capture liquidity-reward weight; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`,
+      `Spread ${ctx.quarterCapital} from your ${ctx.capital} ${ctx.name} stake across a second category (macro, crypto, or sports) on ${ctx.mainChain} for breadth; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`,
+      `Split or merge ${ctx.quarterCapital} of outcome shares on ${ctx.name} (${ctx.mainChain}) alongside your ${ctx.capital} trades to record contract diversity; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`,
     ],
     ctx.slug,
     'pm-s3',
   );
   const s4 = pick(
     [
-      `Weekly on ${ctx.mainChain}: redeem resolved ${ctx.name} positions, rotate ${ctx.quarterCapital} from your ${ctx.capital} bankroll into fresh markets, and log PnL; gas ${ctx.gas}, ~15 min weekly.`,
-      `Each week on ${ctx.mainChain}, claim settled ${ctx.name} markets and place 3-4 disciplined limit orders using your ${ctx.capital} account; cost ${ctx.gas}, ~15 min weekly.`,
-      `Keep a weekly ${ctx.mainChain} cadence on ${ctx.name}: refresh resting limit orders on your ${ctx.capital} balance and claim liquidity rebates; gas ${ctx.gas}, ~10 min weekly.`,
+      `Weekly on ${ctx.mainChain}: redeem resolved ${ctx.name} positions, rotate ${ctx.quarterCapital} from your ${ctx.capital} bankroll into fresh markets, and log PnL; ${ctx.feeLabel} ${ctx.gas}, ~${ctx.weeklyMinutes} min weekly.`,
+      `Each week on ${ctx.mainChain}, claim settled ${ctx.name} markets and place 3-4 disciplined limit orders using your ${ctx.capital} account; cost ${ctx.gas}, ~${ctx.weeklyMinutes} min weekly.`,
+      `Keep a weekly ${ctx.mainChain} cadence on ${ctx.name}: refresh resting limit orders on your ${ctx.capital} balance and claim liquidity rebates; ${ctx.feeLabel} ${ctx.gas}, ~${ctx.weeklyMinutes} min weekly.`,
     ],
     ctx.slug,
     'pm-s4',
@@ -1070,36 +1345,89 @@ function farmPredictionMarket(ctx: FarmContext): string[] {
   return [step1WalletAndBridge(ctx), s2, s3, s4, step5TrackLaunch(ctx)];
 }
 
+function farmStakingRestaking(ctx: FarmContext): string[] {
+  const isRestake = ctx.category === 'Restaking';
+  const s2 = isRestake
+    ? `Delegate or restake ${ctx.capital} of ${ctx.coreAsset} through ${ctx.name} on ${ctx.mainChain} to an active operator/AVS to start epoch points; ${ctx.feeLabel} ${ctx.gas}, ~20 min.`
+    : `Stake ${ctx.capital} of ${ctx.coreAsset} into ${ctx.name}'s validator or staking pool on ${ctx.mainChain} to earn continuous staking duration; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`;
+  const s3 = isRestake
+    ? `Split ${ctx.quarterCapital} of your ${ctx.capital} ${ctx.name} stake across a second validator or security tier on ${ctx.mainChain} to diversify slashing risk; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`
+    : `Delegate ${ctx.quarterCapital} of your ${ctx.capital} ${ctx.name} stake into a second validator pool or liquid-receipt integration on ${ctx.mainChain}; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`;
+  const s4 = `Weekly on ${ctx.mainChain}: verify validator uptime and commission on your ${ctx.capital} ${ctx.name} stake, claim accrued rewards, and restake epoch payouts; ${ctx.feeLabel} ${ctx.gas}, ~${ctx.weeklyMinutes} min weekly.`;
+  return [step1WalletAndBridge(ctx), s2, s3, s4, step5TrackLaunch(ctx)];
+}
+
+function farmBtcYield(ctx: FarmContext): string[] {
+  const s2 = `Lock ${ctx.capital} in BTC through ${ctx.name}'s native minting/peg vault on ${ctx.mainChain} to issue its BTC-backed receipt token with verified UTXO proof; ${ctx.feeLabel} ${ctx.gas}, ~20 min.`;
+  const s3 = `Deploy ${ctx.halfCapital} of your ${ctx.capital} ${ctx.name} BTC receipt into a partnered liquidity pool or yield tranche while keeping unbonding terms documented; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`;
+  const s4 = `Weekly on ${ctx.mainChain}: verify ${ctx.name} proof-of-reserves and BTC peg ratio on your ${ctx.capital} deposit, then harvest or compound accrued BTC yield; ${ctx.feeLabel} ${ctx.gas}, ~${ctx.weeklyMinutes} min weekly.`;
+  return [step1WalletAndBridge(ctx), s2, s3, s4, step5TrackLaunch(ctx)];
+}
+
+function farmStablecoin(ctx: FarmContext): string[] {
+  const s2 = `Mint or wrap ${ctx.capital} of ${ctx.coreAsset} into ${ctx.name}'s flagship stablecoin or yield-bearing wrapper on ${ctx.mainChain} to establish holder duration; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`;
+  const s3 = `Stake ${ctx.halfCapital} of your ${ctx.capital} ${ctx.name} balance in its savings vault or stable-pair DEX pool on ${ctx.mainChain} for dual utility weight; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`;
+  const s4 = `Weekly on ${ctx.mainChain}: check ${ctx.name} peg deviation and reserve backing on your ${ctx.capital} position, then claim or compound yield distributions; ${ctx.feeLabel} ${ctx.gas}, ~${ctx.weeklyMinutes} min weekly.`;
+  return [step1WalletAndBridge(ctx), s2, s3, s4, step5TrackLaunch(ctx)];
+}
+
+function farmCeDeFi(ctx: FarmContext): string[] {
+  const s2 = `Complete ${ctx.name} account verification and subscribe ${ctx.capital} in ${ctx.coreAsset} into its flagship ${ctx.mainChain} CeDeFi yield vault; ${ctx.feeLabel} ${ctx.gas}, ~20 min.`;
+  const s3 = `Allocate ${ctx.quarterCapital} of your ${ctx.capital} ${ctx.name} balance into a secondary fixed-term tranche or on-chain receipt LP on ${ctx.mainChain}; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`;
+  const s4 = `Weekly on ${ctx.mainChain}: review ${ctx.name} custody attestations and yield settlements on your ${ctx.capital} position, and roll maturing terms; ${ctx.feeLabel} ${ctx.gas}, ~${ctx.weeklyMinutes} min weekly.`;
+  return [step1WalletAndBridge(ctx), s2, s3, s4, step5TrackLaunch(ctx)];
+}
+
+function farmInsurance(ctx: FarmContext): string[] {
+  const s2 = `Underwrite ${ctx.capital} in ${ctx.coreAsset} into ${ctx.name}'s primary ${ctx.mainChain} cover pool to earn underwriting premiums and risk-capacity duration; ${ctx.feeLabel} ${ctx.gas}, ~20 min.`;
+  const s3 = `Purchase or allocate ${ctx.quarterCapital} from your ${ctx.capital} budget into a second ${ctx.name} protocol-cover tranche on ${ctx.mainChain} for buyer-side history; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`;
+  const s4 = `Weekly on ${ctx.mainChain}: inspect active cover utilization and pending claim votes on your ${ctx.capital} ${ctx.name} pool, then harvest earned premiums; ${ctx.feeLabel} ${ctx.gas}, ~${ctx.weeklyMinutes} min weekly.`;
+  return [step1WalletAndBridge(ctx), s2, s3, s4, step5TrackLaunch(ctx)];
+}
+
+function farmGovernance(ctx: FarmContext): string[] {
+  const s2 = `Lock or stake ${ctx.capital} in ${ctx.coreAsset} into ${ctx.name} on ${ctx.mainChain} to activate ve-voting weight and incentive gauge eligibility; ${ctx.feeLabel} ${ctx.gas}, ~20 min.`;
+  const s3 = `Allocate gauge votes across 2-3 whitelisted pools and pair ${ctx.quarterCapital} of your ${ctx.capital} ${ctx.name} stake in a boosted LP on ${ctx.mainChain}; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`;
+  const s4 = `Weekly on ${ctx.mainChain}: cast epoch gauge votes on ${ctx.name}, claim voter bribes and rebases on your ${ctx.capital} lock, and compound rewards; ${ctx.feeLabel} ${ctx.gas}, ~${ctx.weeklyMinutes} min weekly.`;
+  return [step1WalletAndBridge(ctx), s2, s3, s4, step5TrackLaunch(ctx)];
+}
+
+function farmIndexes(ctx: FarmContext): string[] {
+  const s2 = `Issue or mint ${ctx.capital} of ${ctx.name}'s flagship on-chain index basket on ${ctx.mainChain} using ${ctx.coreAsset} to establish index holder duration; ${ctx.feeLabel} ${ctx.gas}, ~20 min.`;
+  const s3 = `Deploy ${ctx.quarterCapital} of your ${ctx.capital} ${ctx.name} index tokens into a secondary index basket or DEX liquidity pool on ${ctx.mainChain}; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`;
+  const s4 = `Weekly on ${ctx.mainChain}: verify constituent rebalance weights and NAV tracking on your ${ctx.capital} ${ctx.name} index holding and claim fee rebates; ${ctx.feeLabel} ${ctx.gas}, ~${ctx.weeklyMinutes} min weekly.`;
+  return [step1WalletAndBridge(ctx), s2, s3, s4, step5TrackLaunch(ctx)];
+}
+
+function farmBridge(ctx: FarmContext): string[] {
+  const s2 = `Execute an initial ${ctx.capital} cross-chain ${ctx.coreAsset} transfer via ${ctx.name} starting from ${ctx.mainChain} to a supported destination network; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`;
+  const s3 = `Route ${ctx.halfCapital} of your ${ctx.capital} funds across a second ${ctx.name} corridor (or supply bridge pool liquidity) to record multi-route volume; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`;
+  const s4 = `Weekly on ${ctx.mainChain}: send one organic ${ctx.quarterCapital} cross-chain transfer via ${ctx.name} and reconcile relayer fees on your ${ctx.capital} balance; ${ctx.feeLabel} ${ctx.gas}, ~${ctx.weeklyMinutes} min weekly.`;
+  return [step1WalletAndBridge(ctx), s2, s3, s4, step5TrackLaunch(ctx)];
+}
+
 function farmDefault(ctx: FarmContext): string[] {
-  if (ctx.category === 'Prediction Market') {
-    return farmPredictionMarket(ctx);
-  }
   const catLabel = formatCategoryLabel(ctx.category);
   const s2 = pick(
     [
-      `Commit ${ctx.capital} to ${ctx.name}'s primary ${catLabel} flow on ${ctx.mainChain} to establish sustained TVL-weighted on-chain history; gas ${ctx.gas}, ~20 min.`,
-      `Deposit or transfer ${ctx.capital} through ${ctx.name}'s flagship ${ctx.mainChain} ${catLabel} product and verify balances on-chain; cost ${ctx.gas}, ~15 min.`,
-      `Deploy ${ctx.capital} into ${ctx.name} (${ctx.mainChain}) via its core ${catLabel} route to begin accumulating early-user duration; est. gas ${ctx.gas}, ~20 min.`,
-      `Activate your ${ctx.mainChain} footprint on ${ctx.name} by committing ${ctx.capital} to its highest-liquidity ${catLabel} market; gas ${ctx.gas}, ~15 min.`,
+      `Commit ${ctx.capital} in ${ctx.coreAsset} to ${ctx.name}'s flagship ${catLabel} market on ${ctx.mainChain} to establish sustained TVL-weighted history; ${ctx.feeLabel} ${ctx.gas}, ~20 min.`,
+      `Deposit ${ctx.capital} into ${ctx.name}'s primary ${ctx.mainChain} ${catLabel} contract and verify receipt balances on-chain; cost ${ctx.gas}, ~15 min.`,
     ],
     ctx.slug,
     'def-s2',
   );
   const s3 = pick(
     [
-      `Create a second footprint on ${ctx.name} (${ctx.mainChain}) by deploying ${ctx.quarterCapital} of your ${ctx.capital} into a secondary route, pool, or LP pair; gas ${ctx.gas}, ~15 min.`,
-      `Use ${ctx.quarterCapital} from your ${ctx.capital} ${ctx.name} stack on ${ctx.mainChain} in a complementary DeFi integration or staking tier; est. gas ${ctx.gas}, ~15 min.`,
-      `Pair your core ${ctx.capital} ${ctx.name} ${catLabel} position on ${ctx.mainChain} with a ${ctx.quarterCapital} secondary transfer, swap, or mint; gas ${ctx.gas}, ~15 min.`,
-      `Diversify your ${ctx.name} ${ctx.mainChain} history by routing ${ctx.quarterCapital} of your ${ctx.capital} through a second supported asset or route; gas ${ctx.gas}, ~15 min.`,
+      `Create a second footprint on ${ctx.name} (${ctx.mainChain}) by deploying ${ctx.quarterCapital} of your ${ctx.capital} into a secondary pool or LP pair; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`,
+      `Pair your core ${ctx.capital} ${ctx.name} position on ${ctx.mainChain} with a ${ctx.quarterCapital} secondary transfer, swap, or staking tier; ${ctx.feeLabel} ${ctx.gas}, ~15 min.`,
     ],
     ctx.slug,
     'def-s3',
   );
   const s4 = pick(
     [
-      `Weekly on ${ctx.mainChain}: check ${ctx.name} position health on your ${ctx.capital} allocation, claim accrued rewards, and log one fresh interaction; gas ${ctx.gas}, ~10 min weekly.`,
-      `Each week on ${ctx.mainChain}, review ${ctx.name} ${catLabel} metrics for your ${ctx.capital} stake and compound or rebalance incentives; cost ${ctx.gas}, ~10 min weekly.`,
-      `Keep a weekly ${ctx.mainChain} cadence on ${ctx.name}: harvest rewards from your ${ctx.capital} position and refresh active-epoch eligibility; gas ${ctx.gas}, ~10 min weekly.`,
+      `Weekly on ${ctx.mainChain}: check ${ctx.name} position health on your ${ctx.capital} allocation, claim accrued rewards, and log one fresh interaction; ${ctx.feeLabel} ${ctx.gas}, ~${ctx.weeklyMinutes} min weekly.`,
+      `Each week on ${ctx.mainChain}, review ${ctx.name} metrics for your ${ctx.capital} stake and compound or rebalance incentives; cost ${ctx.gas}, ~${ctx.weeklyMinutes} min weekly.`,
     ],
     ctx.slug,
     'def-s4',
@@ -1109,22 +1437,33 @@ function farmDefault(ctx: FarmContext): string[] {
 
 export type CategoryGroup =
   | 'Lending'
+  | 'CDP'
   | 'Dexs'
   | 'Yield'
   | 'RWA'
   | 'Chain'
   | 'PerpDerivatives'
   | 'Payments'
+  | 'PredictionMarket'
+  | 'StakingRestaking'
+  | 'BtcYield'
+  | 'Stablecoin'
+  | 'CeDeFi'
+  | 'Insurance'
+  | 'Governance'
+  | 'Indexes'
+  | 'Bridge'
   | 'Default';
 
 export function resolveCategoryGroup(category: string | null): CategoryGroup {
   switch (category) {
     case 'Lending':
     case 'Uncollateralized Lending':
-    case 'CDP':
-    case 'CDP Manager':
     case 'Collateral Markets':
       return 'Lending';
+    case 'CDP':
+    case 'CDP Manager':
+      return 'CDP';
     case 'Dexs':
     case 'Liquidity Manager':
     case 'OTC Marketplace':
@@ -1149,6 +1488,27 @@ export function resolveCategoryGroup(category: string | null): CategoryGroup {
     case 'Payments':
     case 'Crypto Card Issuer':
       return 'Payments';
+    case 'Prediction Market':
+      return 'PredictionMarket';
+    case 'Staking Pool':
+    case 'Restaking':
+      return 'StakingRestaking';
+    case 'Anchor BTC':
+    case 'Decentralized BTC':
+      return 'BtcYield';
+    case 'Dual-Token Stablecoin':
+    case 'Stablecoin Wrapper':
+      return 'Stablecoin';
+    case 'CeDeFi':
+      return 'CeDeFi';
+    case 'Insurance':
+      return 'Insurance';
+    case 'Governance Incentives':
+      return 'Governance';
+    case 'Indexes':
+      return 'Indexes';
+    case 'Cross Chain Bridge':
+      return 'Bridge';
     default:
       return 'Default';
   }
@@ -1160,6 +1520,8 @@ export function buildFarmSteps(p: Protocol): string[] {
   switch (group) {
     case 'Lending':
       return farmLending(ctx);
+    case 'CDP':
+      return farmCdp(ctx);
     case 'Dexs':
       return farmDexs(ctx);
     case 'Yield':
@@ -1172,6 +1534,24 @@ export function buildFarmSteps(p: Protocol): string[] {
       return farmPerpDerivatives(ctx);
     case 'Payments':
       return farmPayments(ctx);
+    case 'PredictionMarket':
+      return farmPredictionMarket(ctx);
+    case 'StakingRestaking':
+      return farmStakingRestaking(ctx);
+    case 'BtcYield':
+      return farmBtcYield(ctx);
+    case 'Stablecoin':
+      return farmStablecoin(ctx);
+    case 'CeDeFi':
+      return farmCeDeFi(ctx);
+    case 'Insurance':
+      return farmInsurance(ctx);
+    case 'Governance':
+      return farmGovernance(ctx);
+    case 'Indexes':
+      return farmIndexes(ctx);
+    case 'Bridge':
+      return farmBridge(ctx);
     default:
       return farmDefault(ctx);
   }
@@ -1236,7 +1616,7 @@ export function buildBoard(snapshot: Snapshot): BoardResult {
       tvl_usd: p.tvl_usd,
       effective_tvl_usd: Math.max(1, Math.round(tEff)),
       category,
-      chains: [...p.chains],
+      chains: orderChainsWithPrimary(p.chains),
       change_7d: p.change_7d,
       listed_at: p.listed_at,
       watchlist: watchlistSet.has(p.slug),

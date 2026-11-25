@@ -164,6 +164,53 @@ function main() {
           fail(`row[${i}] (${row.slug}) farm_steps[${s}] length ${step.length} outside [${MIN_STEP_CHARS}, ${MAX_STEP_CHARS}]`);
         }
       }
+      // Step 1 vs Step 4 weekly-minutes consistency gate
+      if (steps.length >= 4 && typeof steps[0] === 'string' && typeof steps[3] === 'string') {
+        const m1 = steps[0].match(/~(\d+)\s*min\/week/i);
+        const m4 = steps[3].match(/~(\d+)\s*min\s+weekly/i);
+        if (m1 && m4 && m1[1] !== m4[1]) {
+          fail(`row[${i}] (${row.slug}) farm_steps weekly-time mismatch: Step 1=${m1[1]}m/wk vs Step 4=${m4[1]}m/wk`);
+        }
+      }
+      // Bitcoin primary-chain EVM leakage gate
+      if (Array.isArray(row.chains) && row.chains[0] === 'Bitcoin') {
+        const joined = steps.join(' ');
+        if (/\b(?:USDC|ETH)\b|canonical bridge|audited bridge/i.test(joined)) {
+          fail(`row[${i}] (${row.slug}) Bitcoin primary farm_steps contains EVM-only wording`);
+        }
+      }
+    }
+    if (typeof row.farm_score === 'number' && row.farm_score <= 1) {
+      fail(`row[${i}] (${row.slug}) farm_score=${row.farm_score} collapsed to floor 1`);
+    }
+    if (typeof row.launch_prior === 'number' && row.launch_prior <= 0) {
+      fail(`row[${i}] (${row.slug}) launch_prior=${row.launch_prior}% collapsed to 0%`);
+    }
+  }
+
+  // Verify no sharp step-cliff drops (>= 15 pts) across $10M / $50M / $250M within same category
+  const byCategory = new Map();
+  for (const row of rows) {
+    if (!row || typeof row.category !== 'string') continue;
+    const list = byCategory.get(row.category) ?? [];
+    list.push(row);
+    byCategory.set(row.category, list);
+  }
+  for (const [cat, list] of byCategory) {
+    for (const a of list) {
+      for (const b of list) {
+        if (typeof a.tvl_usd !== 'number' || typeof b.tvl_usd !== 'number') continue;
+        if (typeof a.farm_score !== 'number' || typeof b.farm_score !== 'number') continue;
+        for (const thr of [10_000_000, 50_000_000, 250_000_000]) {
+          if (a.tvl_usd >= thr && b.tvl_usd < thr && a.tvl_usd <= thr * 2 && b.tvl_usd >= thr * 0.5) {
+            if (a.farm_score - b.farm_score <= -15) {
+              fail(
+                `farm_score cliff in ${cat} across $${thr / 1e6}M: ${a.slug} (${a.farm_score}) vs ${b.slug} (${b.farm_score})`,
+              );
+            }
+          }
+        }
+      }
     }
   }
 
